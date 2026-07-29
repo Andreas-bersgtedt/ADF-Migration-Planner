@@ -465,6 +465,19 @@ export async function scanSelectedFactories(
           throw new Error(backendRun.lastError ?? backendRun.message ?? 'Backend usage scan failed.');
         }
 
+        // The concurrent /status and /results fetches above can race: /results may have returned
+        // a 'pending' snapshot taken before the backend wrote the final 'collected' state.
+        // Fetch results once more now that completion is confirmed to guarantee final data.
+        const finalResults = await backendJson<BackendRunResultsResponse>(`/api/runs/${backendRunId}/results`);
+        const finalUsage = finalResults.usage.map((row) => ({
+          ...row,
+          runId,
+          id: `${runId}:${row.factoryId}`,
+        }));
+        if (finalUsage.length > 0) {
+          await db.factoryUsage.bulkPut(finalUsage);
+        }
+
         const finalRun = await db.runs.get(runId);
         if (!finalRun) {
           throw new Error(`Run ${runId} was not found after backend completion.`);
