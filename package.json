@@ -1,0 +1,32 @@
+{
+  "name": "adf-migration-planner",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "workspaces": [
+    "server"
+  ],
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit -p tsconfig.app.json && tsc --noEmit -p tsconfig.node.json && vite build",
+    "preview": "vite preview",
+    "api:dev": "npm --prefix server run dev",
+    "api:build": "npm --prefix server run build"
+  },
+  "dependencies": {
+    "@azure/msal-browser": "^5.12.0",
+    "@azure/msal-react": "^5.5.2",
+    "dexie": "^4.0.11",
+    "dexie-react-hooks": "^1.1.7",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "write-excel-file": "^4.1.1"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^5.0.2",
+    "typescript": "^5.8.3",
+    "vite": "^7.0.6"
+  }
+}

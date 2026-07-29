@@ -1,0 +1,17 @@
+{
+  "name": "adf-migration-planner-api",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "node --watch src/index.js",
+    "build": "node -e \"console.log('API server is plain Node.js; no compile step required.')\"",
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "12.11.1"
+  }
+}

@@ -1,0 +1,189 @@
+# Quickstart: ADF Migration Planner
+
+This quickstart gets you from zero to a working usage scan. It covers every prerequisite, the exact Azure access the signed-in user needs, environment configuration, and first run.
+
+For deep reference material (all endpoints, metric formulas, troubleshooting), see the [README](../README.md).
+
+---
+
+## 1. Overview
+
+The ADF Migration Planner is an internal dev-mode app with two parts:
+
+1. A React single-page application (SPA) that signs in with Microsoft Entra and drives the workflow.
+2. A local backend scan API that executes Azure Data Factory usage scans off the browser thread.
+
+Data flow at a glance:
+
+1. You sign in interactively (MSAL) and the SPA acquires an Azure Resource Manager (ARM) token.
+2. The SPA discovers subscriptions and inventories Data Factory resources.
+3. You select factories and start a scan.
+4. The SPA forwards the ARM token to the backend, which queries pipeline/activity run history.
+5. Results are aggregated into DIU-hours, Fabric CU-hour estimates, copy data moved, and peak daily CU.
+
+---
+
+## 2. Prerequisites
+
+### 2.1 Local tooling
+
+1. Windows, macOS, or Linux with a modern browser (Edge or Chrome recommended).
+2. Node.js 20 or later, plus npm.
+3. Git (required for the bootstrap script or clone workflow).
+4. PowerShell 5.1+ or PowerShell 7+ if you use [start.ps1](../start.ps1).
+5. Azure CLI (optional) — only needed if you run the backend API standalone without a forwarded SPA token.
+
+### 2.2 Microsoft Entra app registration
+
+Create or reuse an Entra app registration configured as a SPA:
+
+1. Platform type: Single-page application.
+2. Redirect URI: `http://localhost:5173`.
+3. No client secret (public client SPA using authorization code flow with PKCE).
+
+Delegated API permissions to grant on the app registration:
+
+1. Azure Service Management → `user_impersonation` (allows calling ARM as the signed-in user).
+2. Microsoft Graph → `User.Read` (basic sign-in/profile).
+
+After adding permissions, grant admin consent if your tenant requires it.
+
+### 2.3 Required Azure access for the signed-in user
+
+The app can only return data the signed-in user is authorized to read. Grant the user the access below on every target subscription (or narrower scope such as resource group / factory if you want to limit visibility).
+
+#### Recommended: `Reader` role
+
+Assigning the built-in `Reader` role at subscription scope is sufficient for all current functionality:
+
+1. Enumerate subscriptions.
+2. Run Azure Resource Graph queries to discover Data Factory resources.
+3. Read Data Factory pipeline run and activity run history.
+
+#### Granular permissions (if your org restricts broad Reader assignment)
+
+If you must scope down to a custom role, include these actions:
+
+| Purpose | Action |
+| --- | --- |
+| List subscriptions | `Microsoft.Resources/subscriptions/read` |
+| Resource Graph discovery | `Microsoft.ResourceGraph/resources/read` |
+| Read Data Factory resources | `Microsoft.DataFactory/factories/read` |
+| Query pipeline runs | `Microsoft.DataFactory/factories/queryPipelineRuns/action` |
+| Read pipeline runs | `Microsoft.DataFactory/factories/pipelineruns/read` |
+| Query activity runs | `Microsoft.DataFactory/factories/pipelineruns/queryActivityruns/action` |
+| Read activity runs | `Microsoft.DataFactory/factories/activityruns/read` |
+
+Notes:
+
+1. Subscription enumeration requires at least one RBAC role assignment at subscription scope; without it the subscription will not appear.
+2. Access must be granted on each subscription you want scanned. Missing access on a subscription surfaces as a failed subscription entry rather than blocking the whole run.
+3. No write permissions are required. The app is read-only against Azure.
+
+---
+
+## 3. Configuration
+
+Copy `.env.local.example` to `.env.local` in the repository root and set the core values:
+
+```env
+VITE_AZURE_CLIENT_ID=<your-spa-app-client-id>
+VITE_AZURE_TENANT_ID=<your-tenant-id-or-organizations>
+VITE_AZURE_REDIRECT_URI=http://localhost:5173
+```
+
+Optional settings (safe defaults are built in):
+
+```env
+VITE_SCAN_API_BASE_URL=http://localhost:7071
+VITE_SCAN_API_POLL_MS=1500
+VITE_MSAL_TOKEN_TIMEOUT_MS=30000
+VITE_ARM_FETCH_TIMEOUT_MS=45000
+VITE_DB_PREP_TIMEOUT_MS=15000
+VITE_INVENTORY_DISCOVERY_TIMEOUT_MS=45000
+VITE_INVENTORY_SUBSCRIPTION_TIMEOUT_MS=45000
+VITE_SCAN_NO_PROGRESS_TIMEOUT_MS=120000
+```
+
+Optional backend settings (environment variables for the API process):
+
+```env
+PORT=7071
+SCAN_API_ALLOWED_ORIGIN=http://localhost:5173
+SCAN_ARM_FETCH_TIMEOUT_MS=60000
+SCAN_ARM_FETCH_MAX_RETRIES=5
+SCAN_ACTIVITY_QUERY_CONCURRENCY=4
+SCAN_FACTORY_CONCURRENCY=2
+SCAN_MAX_RETAINED_RUNS=50
+SCAN_DATABASE_PATH=server/data/adf-migration-planner.sqlite
+```
+
+The backend persists scan data in embedded SQLite at `server/data/adf-migration-planner.sqlite` by default. This includes activity start/end timestamps, pipeline runs, daily metrics, errors, and checkpoints. IndexedDB is used as a browser-side UI cache; SQLite is the authoritative scan store.
+
+Configuration checks:
+
+1. Sign-in fails without `VITE_AZURE_CLIENT_ID`.
+2. `AADSTS700038` usually means the client ID is a placeholder or invalid.
+3. `AADSTS50011` means the redirect URI does not exactly match the app registration.
+
+---
+
+## 4. Install and run
+
+### Option A: One command (recommended)
+
+From the repository root:
+
+```powershell
+./start.ps1 -UseCurrentRepo
+```
+
+This clears local `node_modules` and npm cache, installs dependencies, starts the backend API in a separate window, and starts the frontend in the current window. The backend stops automatically when the frontend exits.
+
+### Option B: Manual (two terminals)
+
+Terminal 1 — backend API:
+
+```powershell
+npm install
+npm run api:dev
+```
+
+Terminal 2 — frontend:
+
+```powershell
+npm run dev
+```
+
+Then open the shown local URL (default `http://localhost:5173`).
+
+---
+
+## 5. First run
+
+1. Click **Sign in** and complete Entra interactive authentication.
+2. Click **Start inventory run** to discover subscriptions and inventory factories.
+3. In **Factory inventory**, filter/search and select the factories to scan.
+4. Pick a **Scan profile** (1, 3, 5, or 7 days).
+5. Click **Scan selected factories**.
+6. Review the **Usage summary** table. Results are retained across scans until you click **Clear results**.
+7. Optional: enable **Debug mode** in Execution status to show the **Debug trace** panel for step-by-step diagnostics.
+8. Optional: click **Export to Excel** to download the current results.
+
+---
+
+## 6. Verify access quickly
+
+If a scan returns no data or a subscription fails, confirm access before debugging further:
+
+1. Confirm the user has `Reader` (or the granular actions above) on the target subscription.
+2. Confirm the app registration has `user_impersonation` on Azure Service Management with admin consent.
+3. Enable **Debug mode** and read the newest **Debug trace** entries to see which phase failed (`discover-subscriptions` or `inventory-factories:<subscriptionId>`).
+
+---
+
+## 7. Next steps
+
+1. Review metric definitions and formulas in the [README](../README.md#metrics-and-calculations).
+2. Review backend endpoints in the [README](../README.md#backend-scan-api).
+3. Review troubleshooting guidance in the [README](../README.md#troubleshooting).
