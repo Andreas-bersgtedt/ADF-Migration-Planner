@@ -44,7 +44,11 @@ function Stop-BackendProcess {
     try {
         if (-not $Process.HasExited) {
             Write-Host "Stopping backend API process (PID $($Process.Id))..." -ForegroundColor Yellow
-            Stop-Process -Id $Process.Id -Force
+            & taskkill /PID $Process.Id /T | Out-Null
+
+            if (-not $Process.HasExited) {
+                Stop-Process -Id $Process.Id -Force
+            }
         }
     } catch {
         Write-Warning "Failed to stop backend process PID $($Process.Id): $($_.Exception.Message)"
@@ -139,11 +143,14 @@ $serverPackageJsonPath = Join-Path $repoRoot "server\package.json"
 $backendShellProcess = $null
 
 if (Test-Path $serverPackageJsonPath) {
-    Invoke-Step -Message "Starting backend API dev server in a new PowerShell window" -Action {
-        $repoRootEscaped = $repoRoot.Replace("'", "''")
-        $command = "Set-Location '$repoRootEscaped'; npm run api:dev"
-        $backendShellProcess = Start-Process -FilePath "powershell" -ArgumentList @("-NoExit", "-Command", $command) -PassThru
-        Write-Host "Backend API started with PID $($backendShellProcess.Id)." -ForegroundColor Green
+    Invoke-Step -Message "Starting backend API dev server in this terminal" -Action {
+        $npmCommand = Get-Command "npm.cmd" -ErrorAction SilentlyContinue
+        if (-not $npmCommand) {
+            $npmCommand = Get-Command "npm" -ErrorAction Stop
+        }
+
+        $backendShellProcess = Start-Process -FilePath $npmCommand.Source -ArgumentList @("--prefix", "server", "run", "dev") -WorkingDirectory $repoRoot -NoNewWindow -PassThru
+        Write-Host "Backend API started in this terminal with PID $($backendShellProcess.Id)." -ForegroundColor Green
     }
 } else {
     Write-Warning "server/package.json was not found. Starting frontend only."
