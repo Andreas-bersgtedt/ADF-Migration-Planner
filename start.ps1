@@ -1,7 +1,5 @@
 param(
     [string]$RepoUrl,
-    [string]$DestinationRoot = (Join-Path $PSScriptRoot ".bootstrap"),
-    [string]$RepoName = "ADFMigrationPlanner",
     [string]$Branch = "main",
     [switch]$UseCurrentRepo,
     [switch]$BootstrapOnly,
@@ -55,49 +53,42 @@ function Stop-BackendProcess {
 
 Require-Command -Name "npm"
 
-$useGit = $false
-if (-not $UseCurrentRepo) {
-    if ([string]::IsNullOrWhiteSpace($RepoUrl)) {
-        $RepoUrl = Read-Host "Enter the git repository URL to clone (leave blank to use the current folder)"
-    }
+$repoRoot = $PSScriptRoot
+Write-Host "Using repository folder at $repoRoot" -ForegroundColor Yellow
 
-    if (-not [string]::IsNullOrWhiteSpace($RepoUrl)) {
-        $useGit = $true
-    }
-}
-
-$repoRoot = if ($useGit) {
-    Join-Path $DestinationRoot $RepoName
-} else {
-    $PSScriptRoot
-}
-
-if (-not $useGit) {
-    if ($UseCurrentRepo) {
-        Write-Host "Using current repository at $repoRoot" -ForegroundColor Yellow
-    } else {
-        Write-Host "No repository URL provided. Skipping git and using current folder at $repoRoot" -ForegroundColor Yellow
-    }
-} else {
+$useGit = -not [string]::IsNullOrWhiteSpace($RepoUrl)
+if ($useGit) {
     Require-Command -Name "git"
+    $gitFolder = Join-Path $repoRoot ".git"
 
-    Invoke-Step -Message "Preparing clone directory" -Action {
-        if (-not (Test-Path $DestinationRoot)) {
-            New-Item -Path $DestinationRoot -ItemType Directory | Out-Null
-        }
-    }
+    if (Test-Path $gitFolder) {
+        Invoke-Step -Message "Updating repository in current folder" -Action {
+            $originUrl = git -C $repoRoot remote get-url origin 2>$null
+            if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($originUrl)) {
+                git -C $repoRoot remote add origin $RepoUrl
+            } elseif ($originUrl.Trim() -ne $RepoUrl.Trim()) {
+                git -C $repoRoot remote set-url origin $RepoUrl
+            }
 
-    if (Test-Path $repoRoot) {
-        Invoke-Step -Message "Updating existing clone" -Action {
             git -C $repoRoot fetch origin $Branch
             git -C $repoRoot checkout $Branch
             git -C $repoRoot pull --ff-only origin $Branch
         }
     } else {
-        Invoke-Step -Message "Cloning repository" -Action {
-            git clone --branch $Branch $RepoUrl $repoRoot
+        Invoke-Step -Message "Initializing and syncing repository in current folder" -Action {
+            Push-Location $repoRoot
+            try {
+                git init
+                git remote add origin $RepoUrl
+                git fetch origin $Branch
+                git checkout -B $Branch "origin/$Branch"
+            } finally {
+                Pop-Location
+            }
         }
     }
+} else {
+    Write-Host "No repository URL provided. Skipping git sync." -ForegroundColor Yellow
 }
 
 $packageJsonPath = Join-Path $repoRoot "package.json"
