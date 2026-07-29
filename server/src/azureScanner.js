@@ -391,6 +391,7 @@ async function queryPipelineRuns(subscriptionId, resourceGroup, factoryName, las
   const endpoint = `${ARM_ENDPOINT}/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}/providers/Microsoft.DataFactory/factories/${factoryName}/queryPipelineRuns?api-version=2018-06-01`;
   const runs = [];
   let continuationToken;
+  let pageCount = 0;
 
   for (let i = 0; i < 20; i += 1) {
     const page = await armFetch(endpoint, {
@@ -398,6 +399,7 @@ async function queryPipelineRuns(subscriptionId, resourceGroup, factoryName, las
       body: JSON.stringify({ lastUpdatedAfter, lastUpdatedBefore, continuationToken }),
     }, accessTokenOverride);
 
+    pageCount += 1;
     runs.push(...(page.value ?? []));
     if (!page.continuationToken) {
       break;
@@ -406,13 +408,14 @@ async function queryPipelineRuns(subscriptionId, resourceGroup, factoryName, las
     continuationToken = page.continuationToken;
   }
 
-  return runs;
+  return { runs, pageCount };
 }
 
 async function queryActivityRuns(subscriptionId, resourceGroup, factoryName, runId, lastUpdatedAfter, lastUpdatedBefore, accessTokenOverride) {
   const endpoint = `${ARM_ENDPOINT}/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}/providers/Microsoft.DataFactory/factories/${factoryName}/pipelineruns/${runId}/queryActivityruns?api-version=2018-06-01`;
   const activityRuns = [];
   let continuationToken;
+  let pageCount = 0;
 
   for (let i = 0; i < 20; i += 1) {
     const page = await armFetch(endpoint, {
@@ -420,6 +423,7 @@ async function queryActivityRuns(subscriptionId, resourceGroup, factoryName, run
       body: JSON.stringify({ lastUpdatedAfter, lastUpdatedBefore, continuationToken }),
     }, accessTokenOverride);
 
+    pageCount += 1;
     activityRuns.push(...(page.value ?? []));
     if (!page.continuationToken) {
       break;
@@ -428,11 +432,12 @@ async function queryActivityRuns(subscriptionId, resourceGroup, factoryName, run
     continuationToken = page.continuationToken;
   }
 
-  return activityRuns;
+  return { activityRuns, pageCount };
 }
 
 async function scanFactory(runId, factory, windowDays, accessTokenOverride, onProgress) {
   const now = new Date();
+  const scanStartTime = Date.now();
   const effectiveWindowDays = Math.max(1, Math.min(7, Math.trunc(windowDays)));
   const dayWindows = buildDayWindows(effectiveWindowDays, now);
 
@@ -465,6 +470,7 @@ async function scanFactory(runId, factory, windowDays, accessTokenOverride, onPr
     maxDailyEstimatedFabricCuh: 0,
     peakDailyCuRequired: 0,
     dailyMetrics: [],
+    apiCallMetrics: { pipelineRunQueryCalls: 0, activityRunQueryCalls: 0, totalPipelineQueryPages: 0, totalActivityQueryPages: 0, scanStartTime },
     status: 'pending',
     note: `Scanning ${effectiveWindowDays}-day usage in ${dayWindows.length} day chunks...`,
     updatedAtUtc: utcNow(),
@@ -485,7 +491,7 @@ async function scanFactory(runId, factory, windowDays, accessTokenOverride, onPr
     upsertCheckpoint(runId, factory.id, dayWindow.label, 'running');
 
     try {
-      const pipelineRuns = await queryPipelineRuns(
+      const pipelineRunsResult = await queryPipelineRuns(
         factory.subscriptionId,
         factory.resourceGroup,
         factory.name,
@@ -493,6 +499,9 @@ async function scanFactory(runId, factory, windowDays, accessTokenOverride, onPr
         dayWindow.lastUpdatedBefore,
         accessTokenOverride,
       );
+      const pipelineRuns = pipelineRunsResult.runs;
+      usageRecord.apiCallMetrics.pipelineRunQueryCalls += 1;
+      usageRecord.apiCallMetrics.totalPipelineQueryPages += pipelineRunsResult.pageCount;
 
       // Dedup is safe: this synchronous block runs atomically between awaits.
       const newPipelineRuns = pipelineRuns.filter(
@@ -518,7 +527,7 @@ async function scanFactory(runId, factory, windowDays, accessTokenOverride, onPr
         ACTIVITY_RUN_QUERY_CONCURRENCY,
         async (pipelineRun) => {
           try {
-            const activityRuns = await queryActivityRuns(
+            const activityRunsResult = await queryActivityRuns(
               factory.subscriptionId,
               factory.resourceGroup,
               factory.name,
@@ -527,6 +536,9 @@ async function scanFactory(runId, factory, windowDays, accessTokenOverride, onPr
               dayWindow.lastUpdatedBefore,
               accessTokenOverride,
             );
+            const activityRuns = activityRunsResult.activityRuns;
+            usageRecord.apiCallMetrics.activityRunQueryCalls += 1;
+            usageRecord.apiCallMetrics.totalActivityQueryPages += activityRunsResult.pageCount;
 
             upsertActivityRuns(
               runId,
@@ -764,6 +776,19 @@ async function scanFactory(runId, factory, windowDays, accessTokenOverride, onPr
   if (dayChunkErrors.length > 0) {
     usageRecord.note = `${usageRecord.note} Failed chunks: ${dayChunkErrors.join(' | ')}`;
   }
+
+  // Calculate throughput metrics
+  const scanDurationMs = Date.now() - usageRecord.apiCallMetrics.scanStartTime;
+  const totalApiCalls = usageRecord.apiCallMetrics.totalPipelineQueryPages + usageRecord.apiCallMetrics.totalActivityQueryPages;
+  const avgCallsPerSecond = totalApiCalls > 0 ? (totalApiCalls / Math.max(scanDurationMs, 1) * 1000).toFixed(2) : '0';
+  const avgCallDurationMs = totalApiCalls > 0 ? (scanDurationMs / totalApiCalls).toFixed(0) : '0';
+
+  usageRecord.apiCallMetrics.scanDurationMs = scanDurationMs;
+  usageRecord.apiCallMetrics.totalApiCalls = totalApiCalls;
+  usageRecord.apiCallMetrics.avgCallsPerSecond = parseFloat(avgCallsPerSecond);
+  usageRecord.apiCallMetrics.avgCallDurationMs = parseFloat(avgCallDurationMs);
+  usageRecord.note = `${usageRecord.note} | Throughput: ${totalApiCalls} API calls (${avgCallsPerSecond}/sec, ${avgCallDurationMs}ms/call).`;
+
   usageRecord.updatedAtUtc = utcNow();
   return usageRecord;
 }
