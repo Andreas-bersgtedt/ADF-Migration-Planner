@@ -55,6 +55,71 @@ function Stop-BackendProcess {
     }
 }
 
+function Stop-RepoNodeProcesses {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$RepoRoot
+    )
+
+    $normalizedRepoRoot = [System.IO.Path]::GetFullPath($RepoRoot).TrimEnd('\\')
+    $stoppedAny = $false
+
+    try {
+        $nodeProcesses = Get-CimInstance Win32_Process -Filter "Name = 'node.exe'"
+    } catch {
+        Write-Warning "Could not query running node.exe processes: $($_.Exception.Message)"
+        return
+    }
+
+    foreach ($nodeProcess in $nodeProcesses) {
+        $commandLine = [string]$nodeProcess.CommandLine
+        if ([string]::IsNullOrWhiteSpace($commandLine)) {
+            continue
+        }
+
+        if ($commandLine.IndexOf($normalizedRepoRoot, [System.StringComparison]::OrdinalIgnoreCase) -lt 0) {
+            continue
+        }
+
+        try {
+            Write-Host "Stopping repo node process (PID $($nodeProcess.ProcessId))..." -ForegroundColor Yellow
+            Stop-Process -Id $nodeProcess.ProcessId -Force -ErrorAction Stop
+            $stoppedAny = $true
+        } catch {
+            Write-Warning "Failed to stop node process PID $($nodeProcess.ProcessId): $($_.Exception.Message)"
+        }
+    }
+
+    if ($stoppedAny) {
+        Start-Sleep -Milliseconds 400
+    }
+}
+
+function Remove-DirectoryWithRetry {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+        [int]$Attempts = 3
+    )
+
+    for ($attempt = 1; $attempt -le $Attempts; $attempt += 1) {
+        if (-not (Test-Path $Path)) {
+            return
+        }
+
+        try {
+            Remove-Item -Path $Path -Recurse -Force -ErrorAction Stop
+            return
+        } catch {
+            if ($attempt -lt $Attempts) {
+                Start-Sleep -Milliseconds (400 * $attempt)
+            } else {
+                throw
+            }
+        }
+    }
+}
+
 Require-Command -Name "npm"
 
 $repoRoot = $PSScriptRoot
@@ -102,6 +167,10 @@ if (-not (Test-Path $packageJsonPath)) {
 }
 
 if (-not $SkipInstall) {
+    Invoke-Step -Message "Stopping repo Node.js processes that may lock dependencies" -Action {
+        Stop-RepoNodeProcesses -RepoRoot $repoRoot
+    }
+
     Invoke-Step -Message "Clearing local node_modules folders" -Action {
         $localNodeModulesPaths = @(
             (Join-Path $repoRoot "node_modules"),
@@ -111,7 +180,11 @@ if (-not $SkipInstall) {
         foreach ($nodeModulesPath in $localNodeModulesPaths) {
             if (Test-Path $nodeModulesPath) {
                 Write-Host "Removing $nodeModulesPath" -ForegroundColor Yellow
-                Remove-Item -Path $nodeModulesPath -Recurse -Force
+                try {
+                    Remove-DirectoryWithRetry -Path $nodeModulesPath
+                } catch {
+                    throw "Failed to remove $nodeModulesPath. Close processes using files in this folder and rerun. Root cause: $($_.Exception.Message)"
+                }
             }
         }
     }
