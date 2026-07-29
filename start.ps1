@@ -75,8 +75,8 @@ if ($useGit) {
             }
 
             git -C $repoRoot fetch origin $Branch
-            git -C $repoRoot checkout $Branch
-            git -C $repoRoot pull --ff-only origin $Branch
+            git -C $repoRoot checkout -B $Branch
+            git -C $repoRoot reset --hard "origin/$Branch"
         }
     } else {
         Invoke-Step -Message "Initializing and syncing repository in current folder" -Action {
@@ -85,7 +85,8 @@ if ($useGit) {
                 git init
                 git remote add origin $RepoUrl
                 git fetch origin $Branch
-                git checkout -B $Branch "origin/$Branch"
+                git checkout -B $Branch
+                git reset --hard "origin/$Branch"
             } finally {
                 Pop-Location
             }
