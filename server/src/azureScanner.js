@@ -789,6 +789,8 @@ async function scanFactory(runId, factory, windowDays, accessTokenOverride, onPr
   usageRecord.apiCallMetrics.avgCallDurationMs = parseFloat(avgCallDurationMs);
   usageRecord.note = `${usageRecord.note} | Throughput: ${totalApiCalls} API calls (${avgCallsPerSecond}/sec, ${avgCallDurationMs}ms/call).`;
 
+  console.log(`✓ ${usageRecord.factoryName}: ${usageRecord.note}`);
+
   usageRecord.updatedAtUtc = utcNow();
   return usageRecord;
 }
