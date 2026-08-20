@@ -1,7 +1,7 @@
 import { InteractionRequiredAuthError, type IPublicClientApplication } from '@azure/msal-browser';
 import { db } from '../data/db';
 import { inventoryFactoriesForSubscription, listSubscriptions } from '../api/azureManagement';
-import { armScopes } from '../auth/msalConfig';
+import { armScopes, isBackendAuth } from '../auth/msalConfig';
 import type { FactoryUsageRecord, RunRecord, RunStepRecord, SubscriptionProgressRecord } from '../types/azure';
 import { createId, utcNow } from '../utils/time';
 
@@ -375,13 +375,13 @@ export async function scanSelectedFactories(
   }
 
   try {
-    const accessToken = await acquireArmToken(msalInstance);
+    const accessToken = isBackendAuth ? undefined : await acquireArmToken(msalInstance);
 
     const createResponse = await backendJson<{ runId: string; status: string }>('/api/runs', {
       method: 'POST',
       body: JSON.stringify({
         windowDays,
-        accessToken,
+        ...(accessToken ? { accessToken } : {}),
         factories: selectedFactories.map((factory) => ({
           id: factory.id,
           name: factory.name,

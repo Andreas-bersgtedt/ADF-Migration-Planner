@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { ConfidentialClientApplication } from '@azure/msal-node';
 import {
   recordScanError,
   upsertActivityRuns,
@@ -20,6 +21,7 @@ const FABRIC_CUH_PER_MAPPING_DATAFLOW_VCORE_HOUR = 0.5;
 const BYTES_PER_GIB = 1024 * 1024 * 1024;
 const ARM_FETCH_TIMEOUT_MS = Number(process.env.SCAN_ARM_FETCH_TIMEOUT_MS ?? 60000);
 const ARM_FETCH_MAX_RETRIES = Number(process.env.SCAN_ARM_FETCH_MAX_RETRIES ?? 5);
+const BACKEND_AUTH_MODE = process.env.SCAN_AUTH_MODE === 'client-secret' ? 'client-secret' : 'azure-cli';
 
 const ORCHESTRATION_ACTIVITY_TYPES = new Set([
   'appendvariable',
@@ -40,6 +42,7 @@ const ORCHESTRATION_ACTIVITY_TYPES = new Set([
 ]);
 
 let cachedToken = null;
+let confidentialClient = null;
 
 function utcNow() {
   return new Date().toISOString();
@@ -310,12 +313,47 @@ async function mapWithConcurrency(items, concurrency, worker) {
   return results;
 }
 
-async function getAccessToken() {
-  const now = Date.now();
-  if (cachedToken && cachedToken.expiresOn > now + 2 * 60 * 1000) {
-    return cachedToken.token;
+function getClientSecretConfiguration() {
+  const clientId = process.env.AZURE_CLIENT_ID?.trim();
+  const tenantId = process.env.AZURE_TENANT_ID?.trim();
+  const clientSecret = process.env.AZURE_CLIENT_SECRET?.trim();
+  const missing = [
+    !clientId ? 'AZURE_CLIENT_ID' : null,
+    !tenantId ? 'AZURE_TENANT_ID' : null,
+    !clientSecret ? 'AZURE_CLIENT_SECRET' : null,
+  ].filter(Boolean);
+
+  if (missing.length > 0) {
+    throw new Error(`Client-secret authentication is missing: ${missing.join(', ')}.`);
   }
 
+  return { clientId, tenantId, clientSecret };
+}
+
+async function getClientSecretAccessToken() {
+  const config = getClientSecretConfiguration();
+  confidentialClient ??= new ConfidentialClientApplication({
+    auth: {
+      clientId: config.clientId,
+      authority: `https://login.microsoftonline.com/${config.tenantId}`,
+      clientSecret: config.clientSecret,
+    },
+  });
+
+  const result = await confidentialClient.acquireTokenByClientCredential({
+    scopes: [`${ARM_ENDPOINT}/.default`],
+  });
+  if (!result?.accessToken) {
+    throw new Error('Microsoft Entra did not return an ARM access token for the service principal.');
+  }
+
+  return {
+    token: result.accessToken,
+    expiresOn: result.expiresOn?.getTime() ?? Date.now() + 5 * 60 * 1000,
+  };
+}
+
+async function getAzureCliAccessToken() {
   const { stdout } = await execFileAsync('az', [
     'account',
     'get-access-token',
@@ -326,13 +364,50 @@ async function getAccessToken() {
   ]);
 
   const payload = JSON.parse(stdout);
-  const expiresOn = new Date(payload.expiresOn).getTime();
-  cachedToken = {
+  return {
     token: payload.accessToken,
-    expiresOn,
+    expiresOn: new Date(payload.expiresOn).getTime(),
   };
+}
+
+async function getAccessToken() {
+  const now = Date.now();
+  if (cachedToken && cachedToken.expiresOn > now + 2 * 60 * 1000) {
+    return cachedToken.token;
+  }
+
+  cachedToken = BACKEND_AUTH_MODE === 'client-secret'
+    ? await getClientSecretAccessToken()
+    : await getAzureCliAccessToken();
 
   return cachedToken.token;
+}
+
+export async function getBackendIdentity() {
+  if (BACKEND_AUTH_MODE === 'client-secret') {
+    const config = getClientSecretConfiguration();
+    await getAccessToken();
+    return {
+      authMode: BACKEND_AUTH_MODE,
+      displayName: `Service principal ${config.clientId}`,
+      tenantId: config.tenantId,
+      username: config.clientId,
+    };
+  }
+
+  try {
+    const { stdout } = await execFileAsync('az', ['account', 'show', '--output', 'json']);
+    const account = JSON.parse(stdout);
+    return {
+      authMode: BACKEND_AUTH_MODE,
+      displayName: String(account.name ?? ''),
+      tenantId: String(account.tenantId ?? ''),
+      username: String(account.user?.name ?? ''),
+    };
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : 'Azure CLI account lookup failed.';
+    throw new Error(`No usable Azure CLI session was found. ${detail}`);
+  }
 }
 
 async function armFetch(url, init, accessTokenOverride) {
@@ -385,6 +460,40 @@ async function armFetch(url, init, accessTokenOverride) {
   }
 
   throw new Error(`Azure request failed after ${maxRetries + 1} attempts: ${url}`);
+}
+
+export async function listAzureSubscriptions() {
+  const payload = await armFetch(`${ARM_ENDPOINT}/subscriptions?api-version=2022-12-01`);
+  const discoveredAtUtc = utcNow();
+  return (payload.value ?? []).map((subscription) => ({
+    id: subscription.subscriptionId,
+    subscriptionId: subscription.subscriptionId,
+    displayName: subscription.displayName,
+    tenantId: subscription.tenantId,
+    state: subscription.state,
+    discoveredAtUtc,
+  }));
+}
+
+export async function inventoryAzureFactories(subscriptionId) {
+  const payload = await armFetch(`${ARM_ENDPOINT}/providers/Microsoft.ResourceGraph/resources?api-version=2022-10-01`, {
+    method: 'POST',
+    body: JSON.stringify({
+      subscriptions: [subscriptionId],
+      query: "Resources | where type =~ 'microsoft.datafactory/factories' | project id, name, subscriptionId, resourceGroup, location, tags",
+      options: { resultFormat: 'objectArray' },
+    }),
+  });
+  const discoveredAtUtc = utcNow();
+  return (payload.data ?? []).map((factory) => ({
+    id: factory.id,
+    name: factory.name,
+    subscriptionId: factory.subscriptionId,
+    resourceGroup: factory.resourceGroup,
+    location: factory.location,
+    discoveredAtUtc,
+    tags: factory.tags,
+  }));
 }
 
 async function queryPipelineRuns(subscriptionId, resourceGroup, factoryName, lastUpdatedAfter, lastUpdatedBefore, accessTokenOverride) {

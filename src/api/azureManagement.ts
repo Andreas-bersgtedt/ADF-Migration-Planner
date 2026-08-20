@@ -1,10 +1,11 @@
 import { InteractionRequiredAuthError, type IPublicClientApplication } from '@azure/msal-browser';
-import { armScopes, loginRequest } from '../auth/msalConfig';
+import { armScopes, authMode, isBackendAuth, loginRequest } from '../auth/msalConfig';
 import type { FactoryRecord, SubscriptionRecord } from '../types/azure';
 import { utcNow } from '../utils/time';
 
 const ARM_ENDPOINT = 'https://management.azure.com';
 const GRAPH_ENDPOINT = `${ARM_ENDPOINT}/providers/Microsoft.ResourceGraph/resources?api-version=2022-10-01`;
+const backendApiBaseUrl = (import.meta.env.VITE_SCAN_API_BASE_URL as string | undefined)?.trim() || 'http://localhost:7071';
 const MSAL_TOKEN_TIMEOUT_MS = Number(import.meta.env.VITE_MSAL_TOKEN_TIMEOUT_MS ?? 30000);
 const ARM_FETCH_TIMEOUT_MS = Number(import.meta.env.VITE_ARM_FETCH_TIMEOUT_MS ?? 45000);
 
@@ -26,6 +27,40 @@ interface SubscriptionApiRecord {
   displayName: string;
   state?: string;
   tenantId?: string;
+}
+
+export interface BackendIdentity {
+  authMode: 'azure-cli' | 'client-secret';
+  displayName: string;
+  tenantId: string;
+  username: string;
+}
+
+async function backendJson<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(`${backendApiBaseUrl}${path}`, {
+    ...init,
+    headers: {
+      'Content-Type': 'application/json',
+      ...(init?.headers ?? {}),
+    },
+  });
+
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(`Azure backend request failed (${response.status}): ${body}`);
+  }
+
+  return (await response.json()) as T;
+}
+
+export async function getBackendIdentity(): Promise<BackendIdentity> {
+  const identity = await backendJson<BackendIdentity>('/api/azure/account');
+  if (identity.authMode !== authMode) {
+    throw new Error(
+      `Authentication mode mismatch: frontend uses ${authMode}, but backend uses ${identity.authMode}. Set VITE_AUTH_MODE and SCAN_AUTH_MODE to the same backend mode.`,
+    );
+  }
+  return identity;
 }
 
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
@@ -111,6 +146,10 @@ async function armFetch<T>(msalInstance: IPublicClientApplication, url: string, 
 }
 
 export async function listSubscriptions(msalInstance: IPublicClientApplication): Promise<SubscriptionRecord[]> {
+  if (isBackendAuth) {
+    return backendJson<SubscriptionRecord[]>('/api/azure/subscriptions');
+  }
+
   const payload = await armFetch<{ value: SubscriptionApiRecord[] }>(
     msalInstance,
     `${ARM_ENDPOINT}/subscriptions?api-version=2022-12-01`,
@@ -132,6 +171,13 @@ export async function inventoryFactoriesForSubscription(
   msalInstance: IPublicClientApplication,
   subscriptionId: string,
 ): Promise<FactoryRecord[]> {
+  if (isBackendAuth) {
+    return backendJson<FactoryRecord[]>('/api/azure/factories', {
+      method: 'POST',
+      body: JSON.stringify({ subscriptionId }),
+    });
+  }
+
   const body = {
     subscriptions: [subscriptionId],
     query:

@@ -1,6 +1,6 @@
 import { createServer } from 'node:http';
 import { URL } from 'node:url';
-import { scanFactories } from './azureScanner.js';
+import { getBackendIdentity, inventoryAzureFactories, listAzureSubscriptions, scanFactories } from './azureScanner.js';
 import {
   createRun,
   getRun,
@@ -13,6 +13,7 @@ import {
 } from './state.js';
 
 const port = Number(process.env.PORT ?? 7071);
+const host = (process.env.HOST ?? '127.0.0.1').trim();
 const allowedOrigin = (process.env.SCAN_API_ALLOWED_ORIGIN ?? 'http://localhost:5173').trim();
 
 function logRunAction(runId, action) {
@@ -134,6 +135,37 @@ const server = createServer(async (req, res) => {
 
   if (req.method === 'GET' && pathname === '/health') {
     sendJson(res, 200, { status: 'ok' });
+    return;
+  }
+
+  if (req.method === 'GET' && pathname === '/api/azure/account') {
+    try {
+      sendJson(res, 200, await getBackendIdentity());
+    } catch (error) {
+      sendJson(res, 401, { error: error instanceof Error ? error.message : 'Backend authentication failed.' });
+    }
+    return;
+  }
+
+  if (req.method === 'GET' && pathname === '/api/azure/subscriptions') {
+    try {
+      sendJson(res, 200, await listAzureSubscriptions());
+    } catch (error) {
+      sendJson(res, 502, { error: error instanceof Error ? error.message : 'Subscription discovery failed.' });
+    }
+    return;
+  }
+
+  if (req.method === 'POST' && pathname === '/api/azure/factories') {
+    try {
+      const body = await readJsonBody(req);
+      if (!body || typeof body.subscriptionId !== 'string' || body.subscriptionId.trim().length === 0) {
+        throw new Error('subscriptionId must be a non-empty string.');
+      }
+      sendJson(res, 200, await inventoryAzureFactories(body.subscriptionId.trim()));
+    } catch (error) {
+      sendJson(res, 400, { error: error instanceof Error ? error.message : 'Factory inventory failed.' });
+    }
     return;
   }
 
@@ -274,7 +306,7 @@ const server = createServer(async (req, res) => {
   sendJson(res, 404, { error: 'Not found.' });
 });
 
-server.listen(port, () => {
+server.listen(port, host, () => {
   // eslint-disable-next-line no-console
-  console.log(`ADF scan API listening on http://localhost:${port}`);
+  console.log(`ADF scan API listening on http://${host}:${port}`);
 });

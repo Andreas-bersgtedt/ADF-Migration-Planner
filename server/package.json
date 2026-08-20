@@ -12,6 +12,7 @@
     "start": "node src/index.js"
   },
   "dependencies": {
+    "@azure/msal-node": "^5.5.0",
     "better-sqlite3": "12.11.1"
   }
 }

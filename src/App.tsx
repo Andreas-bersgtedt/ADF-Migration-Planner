@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useMsal } from '@azure/msal-react';
-import { isMsalConfigured, loginRequest, msalConfigurationError } from './auth/msalConfig';
+import { getBackendIdentity, type BackendIdentity } from './api/azureManagement';
+import { isBackendAuth, isClientSecretAuth, isMsalConfigured, loginRequest, msalConfigurationError } from './auth/msalConfig';
 import { StatusCard } from './components/StatusCard';
 import { db } from './data/db';
 import { usePlannerData } from './hooks/usePlannerData';
@@ -30,9 +31,12 @@ function App() {
   const [subscriptionFilter, setSubscriptionFilter] = useState<string>('all');
   const [factoryTextFilter, setFactoryTextFilter] = useState('');
   const [debugModeEnabled, setDebugModeEnabled] = useState(false);
+  const [backendIdentity, setBackendIdentity] = useState<BackendIdentity | null>(null);
 
   const activeAccount = instance.getActiveAccount() ?? accounts[0] ?? null;
-  const activeTenantId = activeAccount?.tenantId ?? 'organizations';
+  const isAuthenticated = isBackendAuth ? backendIdentity !== null : activeAccount !== null;
+  const activeTenantId = backendIdentity?.tenantId ?? activeAccount?.tenantId ?? 'organizations';
+  const activeUsername = backendIdentity?.username ?? activeAccount?.username ?? 'Not signed in';
   const latestRun = runs[0];
   const latestRunProgress = latestRun ? progress.filter((item) => item.runId === latestRun.runId) : [];
   const latestRunSteps = latestRun ? runSteps.filter((item) => item.runId === latestRun.runId).slice(0, 20) : [];
@@ -123,6 +127,12 @@ function App() {
   }, [activeAccount]);
 
   useEffect(() => {
+    if (isBackendAuth) {
+      void refreshBackendIdentity();
+    }
+  }, []);
+
+  useEffect(() => {
     setSelectedFactoryIds((existing) => existing.filter((id) => factories.some((factory) => factory.id === id)));
   }, [factories]);
 
@@ -132,8 +142,28 @@ function App() {
       return;
     }
 
-    setMessage('Redirecting to Microsoft Entra sign-in...');
-    await instance.loginRedirect(loginRequest);
+    if (isBackendAuth) {
+      await refreshBackendIdentity();
+    } else {
+      setMessage('Redirecting to Microsoft Entra sign-in...');
+      await instance.loginRedirect(loginRequest);
+    }
+  }
+
+  async function refreshBackendIdentity(): Promise<void> {
+    setMessage(`Checking ${isClientSecretAuth ? 'service principal credentials' : 'the local Azure CLI session'}...`);
+    try {
+      const identity = await getBackendIdentity();
+      setBackendIdentity(identity);
+      setMessage(`Using ${identity.authMode === 'client-secret' ? 'service principal' : 'Azure CLI account'} ${identity.username}.`);
+    } catch (error) {
+      setBackendIdentity(null);
+      setMessage(
+        error instanceof Error
+          ? `${error.message}${isClientSecretAuth ? '' : ' Run az login --tenant <tenant-id> in a terminal, then retry.'}`
+          : 'Backend authentication failed.',
+      );
+    }
   }
 
   async function handleStartRun(): Promise<void> {
@@ -250,12 +280,12 @@ function App() {
           <p className="hero__meta">Tenant</p>
           <strong>{activeTenantId}</strong>
           <p className="hero__meta">User</p>
-          <strong>{activeAccount?.username ?? 'Not signed in'}</strong>
+          <strong>{activeUsername}</strong>
           <div className="hero__actions">
             <button className="button button--secondary" type="button" onClick={handleSignIn} disabled={!isMsalConfigured}>
-              {activeAccount ? 'Switch account' : 'Sign in'}
+              {isClientSecretAuth ? 'Verify service principal' : isBackendAuth ? 'Refresh CLI session' : activeAccount ? 'Switch account' : 'Sign in'}
             </button>
-            <button className="button" type="button" onClick={handleStartRun} disabled={!activeAccount || isRunning || !isMsalConfigured}>
+            <button className="button" type="button" onClick={handleStartRun} disabled={!isAuthenticated || isRunning || !isMsalConfigured}>
               {isRunning ? 'Running...' : 'Start inventory run'}
             </button>
           </div>

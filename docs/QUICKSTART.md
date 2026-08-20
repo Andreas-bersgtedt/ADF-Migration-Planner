@@ -87,6 +87,7 @@ Notes:
 Copy `.env.local.example` to `.env.local` in the repository root and set the core values:
 
 ```env
+VITE_AUTH_MODE=msal
 VITE_AZURE_CLIENT_ID=<your-spa-app-client-id>
 VITE_AZURE_TENANT_ID=<your-tenant-id-or-organizations>
 VITE_AZURE_REDIRECT_URI=http://localhost:5173
@@ -125,6 +126,47 @@ Configuration checks:
 1. Sign-in fails without `VITE_AZURE_CLIENT_ID`.
 2. `AADSTS700038` usually means the client ID is a placeholder or invalid.
 3. `AADSTS50011` means the redirect URI does not exactly match the app registration.
+
+### 3.1 Alternate mode for `AADSTS50105`
+
+When tenant policy requires assignment to the planner's enterprise application and the user cannot obtain it, sign in through the tenant-approved Azure CLI client:
+
+```powershell
+az login --tenant <customer-tenant-id>
+az account set --subscription <subscription-id>
+```
+
+Then use this `.env.local` configuration:
+
+```env
+VITE_AUTH_MODE=azure-cli
+VITE_SCAN_API_BASE_URL=http://localhost:7071
+```
+
+Start both processes as usual. The app header shows the active CLI user, and **Refresh CLI session** checks it again. Azure CLI must still be allowed by tenant policy, and the signed-in user must have the required Azure RBAC access.
+
+### 3.2 Client-secret mode
+
+Client secrets cannot be stored in a browser SPA. The planner implements this option in the local Node backend with MSAL Node's confidential-client flow.
+
+Set `.env.local` to:
+
+```env
+VITE_AUTH_MODE=client-secret
+VITE_SCAN_API_BASE_URL=http://localhost:7071
+```
+
+In the same PowerShell session used to launch the app, set:
+
+```powershell
+$env:SCAN_AUTH_MODE = 'client-secret'
+$env:AZURE_TENANT_ID = '<tenant-id>'
+$env:AZURE_CLIENT_ID = '<app-client-id>'
+$env:AZURE_CLIENT_SECRET = '<client-secret>'
+./start.ps1 -UseCurrentRepo
+```
+
+Never use a `VITE_*` variable for the secret. Assign the service principal `Reader` or the documented granular role on each target Azure scope. User assignment is not involved because ARM authorizes the service principal rather than an interactive user.
 
 ---
 

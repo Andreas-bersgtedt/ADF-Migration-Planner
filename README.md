@@ -96,6 +96,7 @@ Notes:
 Copy [.env.local.example](.env.local.example) to `.env.local` and set values:
 
 ```env
+VITE_AUTH_MODE=msal
 VITE_AZURE_CLIENT_ID=<your-spa-app-client-id>
 VITE_AZURE_TENANT_ID=organizations
 VITE_AZURE_REDIRECT_URI=http://localhost:5173
@@ -106,6 +107,51 @@ Notes:
 1. The app will not sign in without `VITE_AZURE_CLIENT_ID`.
 2. If you see `AADSTS700038`, check that client ID is real and not placeholder.
 3. If you see `AADSTS50011`, confirm redirect URI exactly matches the app registration.
+
+### Alternate Azure CLI authentication
+
+If `AADSTS50105` blocks the user because the tenant requires assignment to this app, the local development app can reuse an approved Azure CLI session instead:
+
+```powershell
+az login --tenant <customer-tenant-id>
+az account set --subscription <subscription-id>
+```
+
+Set `.env.local` to:
+
+```env
+VITE_AUTH_MODE=azure-cli
+VITE_SCAN_API_BASE_URL=http://localhost:7071
+```
+
+The SPA client ID is not required in this mode. Subscription discovery, Resource Graph inventory, and usage scans run through the local Node API; ARM tokens are not returned to the browser. The API binds to `127.0.0.1` by default.
+
+This mode does not bypass tenant security policy. Azure CLI must be permitted by Conditional Access, and the CLI user still needs the Azure RBAC permissions listed above. If Shell also blocks the Azure CLI enterprise application, the app owner or IAM process must provide an approved client or workload identity.
+
+### Service principal client-secret authentication
+
+A browser SPA cannot keep a client secret. This mode uses MSAL Node in the local backend as a confidential client. The browser receives inventory data, not the secret or the service principal's ARM token.
+
+Set the frontend mode in `.env.local`:
+
+```env
+VITE_AUTH_MODE=client-secret
+VITE_SCAN_API_BASE_URL=http://localhost:7071
+```
+
+Set backend process variables before starting the app:
+
+```powershell
+$env:SCAN_AUTH_MODE = 'client-secret'
+$env:AZURE_TENANT_ID = '<tenant-id>'
+$env:AZURE_CLIENT_ID = '<app-client-id>'
+$env:AZURE_CLIENT_SECRET = '<client-secret>'
+./start.ps1 -UseCurrentRepo
+```
+
+Do not put `AZURE_CLIENT_SECRET` in `.env.local`, any `VITE_*` variable, source control, or browser storage. Grant the app's service principal `Reader` or the granular role described above on each target scope. Client credentials run as the service principal, not as the customer user, so user assignment does not apply.
+
+For a hosted deployment, replace the secret with managed identity or a certificate. If a secret is required, store it in Azure Key Vault and define a rotation schedule.
 
 ## Installation And Startup
 
@@ -198,7 +244,13 @@ VITE_SCAN_NO_PROGRESS_TIMEOUT_MS=120000
 Optional backend settings (environment variables for the API process):
 
 ```env
+HOST=127.0.0.1
 PORT=7071
+SCAN_AUTH_MODE=azure-cli
+# Required only when SCAN_AUTH_MODE=client-secret:
+AZURE_TENANT_ID=<tenant-id>
+AZURE_CLIENT_ID=<app-client-id>
+AZURE_CLIENT_SECRET=<client-secret>
 SCAN_API_ALLOWED_ORIGIN=http://localhost:5173
 SCAN_ARM_FETCH_TIMEOUT_MS=60000
 SCAN_ARM_FETCH_MAX_RETRIES=5
