@@ -21,6 +21,10 @@ const FABRIC_CUH_PER_MAPPING_DATAFLOW_VCORE_HOUR = 0.5;
 const BYTES_PER_GIB = 1024 * 1024 * 1024;
 const ARM_FETCH_TIMEOUT_MS = Number(process.env.SCAN_ARM_FETCH_TIMEOUT_MS ?? 60000);
 const ARM_FETCH_MAX_RETRIES = Number(process.env.SCAN_ARM_FETCH_MAX_RETRIES ?? 5);
+const ADAPTIVE_CONCURRENCY_MIN = Number(process.env.SCAN_ADAPTIVE_CONCURRENCY_MIN ?? 1);
+const ADAPTIVE_CONCURRENCY_START = Number(process.env.SCAN_ADAPTIVE_CONCURRENCY_START ?? 3);
+const ADAPTIVE_CONCURRENCY_MAX = Number(process.env.SCAN_ADAPTIVE_CONCURRENCY_MAX ?? 8);
+const ADAPTIVE_CONCURRENCY_STABLE_WINDOW = Number(process.env.SCAN_ADAPTIVE_CONCURRENCY_STABLE_WINDOW ?? 3);
 const BACKEND_AUTH_MODE = process.env.SCAN_AUTH_MODE === 'client-secret' ? 'client-secret' : 'azure-cli';
 
 const ORCHESTRATION_ACTIVITY_TYPES = new Set([
@@ -50,6 +54,85 @@ function utcNow() {
 
 function delay(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function clamp(value, min, max) {
+  return Math.min(Math.max(value, min), max);
+}
+
+function createAdaptiveConcurrencyController(initialLimit, minLimit, maxLimit, stableWindowSize) {
+  let currentLimit = clamp(initialLimit, minLimit, maxLimit);
+  let cooldownUntil = 0;
+  let stableSuccessCount = 0;
+
+  return {
+    async waitForCooldown() {
+      const waitMs = Math.max(0, cooldownUntil - Date.now());
+      if (waitMs > 0) {
+        await delay(waitMs);
+      }
+    },
+    getLimit() {
+      const now = Date.now();
+      const activeLimit = now < cooldownUntil ? Math.max(minLimit, currentLimit - 1) : currentLimit;
+      return clamp(activeLimit, minLimit, maxLimit);
+    },
+    recordSuccess() {
+      stableSuccessCount += 1;
+      if (stableSuccessCount >= stableWindowSize) {
+        currentLimit = clamp(currentLimit + 1, minLimit, maxLimit);
+        stableSuccessCount = 0;
+      }
+    },
+    recordThrottle(retryAfterMs) {
+      const throttleMs = Math.max(retryAfterMs ?? 1000, 1000);
+      currentLimit = Math.max(minLimit, Math.floor(currentLimit / 2));
+      cooldownUntil = Math.max(cooldownUntil, Date.now() + throttleMs);
+      stableSuccessCount = 0;
+    },
+    recordLowHeadroom() {
+      currentLimit = Math.max(minLimit, Math.floor(currentLimit * 0.75));
+      cooldownUntil = Math.max(cooldownUntil, Date.now() + 2000);
+      stableSuccessCount = 0;
+    },
+  };
+}
+
+const adaptiveConcurrencyController = createAdaptiveConcurrencyController(
+  ADAPTIVE_CONCURRENCY_START,
+  ADAPTIVE_CONCURRENCY_MIN,
+  ADAPTIVE_CONCURRENCY_MAX,
+  ADAPTIVE_CONCURRENCY_STABLE_WINDOW,
+);
+
+function resolveAdaptiveConcurrency(baseConcurrency) {
+  return Math.max(1, Math.min(baseConcurrency, adaptiveConcurrencyController.getLimit()));
+}
+
+function getLowRemainingRateLimit(headers) {
+  const candidates = [
+    'x-ms-ratelimit-remaining-subscription-reads',
+    'x-ms-ratelimit-remaining-subscription-writes',
+    'x-ms-ratelimit-remaining-subscription-deletes',
+    'x-ms-ratelimit-remaining-tenant-reads',
+    'x-ms-ratelimit-remaining-tenant-writes',
+    'x-ms-ratelimit-remaining-tenant-deletes',
+  ];
+
+  let lowestRemaining = Number.POSITIVE_INFINITY;
+  for (const candidate of candidates) {
+    const value = headers.get(candidate);
+    if (value === null) {
+      continue;
+    }
+
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) {
+      lowestRemaining = Math.min(lowestRemaining, parsed);
+    }
+  }
+
+  return Number.isFinite(lowestRemaining) ? lowestRemaining : null;
 }
 
 function getRetryDelayMs(response, retryAttempt) {
@@ -418,6 +501,7 @@ async function armFetch(url, init, accessTokenOverride) {
     : 5;
 
   for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+    await adaptiveConcurrencyController.waitForCooldown();
     const abortController = new AbortController();
     const timeoutHandle = setTimeout(() => abortController.abort(), timeoutMs);
     let response;
@@ -448,6 +532,12 @@ async function armFetch(url, init, accessTokenOverride) {
     }
 
     if (response.ok) {
+      const remainingRateLimit = getLowRemainingRateLimit(response.headers);
+      if (remainingRateLimit !== null && remainingRateLimit <= 10) {
+        adaptiveConcurrencyController.recordLowHeadroom();
+      } else {
+        adaptiveConcurrencyController.recordSuccess();
+      }
       return response.json();
     }
 
@@ -456,7 +546,9 @@ async function armFetch(url, init, accessTokenOverride) {
       throw new Error(`Azure request failed (${response.status}) after ${attempt + 1} attempt(s): ${body}`);
     }
 
-    await delay(getRetryDelayMs(response, attempt));
+    const retryDelayMs = getRetryDelayMs(response, attempt);
+    adaptiveConcurrencyController.recordThrottle(retryDelayMs);
+    await delay(retryDelayMs);
   }
 
   throw new Error(`Azure request failed after ${maxRetries + 1} attempts: ${url}`);
@@ -596,7 +688,8 @@ async function scanFactory(runId, factory, windowDays, accessTokenOverride, onPr
 
   // Process all day windows in parallel. Each task aggregates into usageRecord synchronously
   // (no await between the mutations and the onProgress call, so tasks never interleave there).
-  await mapWithConcurrency(dayWindows, DAY_WINDOW_CONCURRENCY, async (dayWindow) => {
+  const adaptiveDayWindowConcurrency = resolveAdaptiveConcurrency(DAY_WINDOW_CONCURRENCY);
+  await mapWithConcurrency(dayWindows, adaptiveDayWindowConcurrency, async (dayWindow) => {
     upsertCheckpoint(runId, factory.id, dayWindow.label, 'running');
 
     try {
@@ -633,7 +726,7 @@ async function scanFactory(runId, factory, windowDays, accessTokenOverride, onPr
 
       const runActivityMetrics = await mapWithConcurrency(
         newPipelineRuns,
-        ACTIVITY_RUN_QUERY_CONCURRENCY,
+        resolveAdaptiveConcurrency(ACTIVITY_RUN_QUERY_CONCURRENCY),
         async (pipelineRun) => {
           try {
             const activityRunsResult = await queryActivityRuns(
@@ -905,7 +998,8 @@ async function scanFactory(runId, factory, windowDays, accessTokenOverride, onPr
 }
 
 export async function scanFactories(runId, factories, windowDays, accessTokenOverride, onProgress) {
-  return mapWithConcurrency(factories, FACTORY_SCAN_CONCURRENCY, async (factory) =>
+  const adaptiveFactoryConcurrency = resolveAdaptiveConcurrency(FACTORY_SCAN_CONCURRENCY);
+  return mapWithConcurrency(factories, adaptiveFactoryConcurrency, async (factory) =>
     scanFactory(runId, factory, windowDays, accessTokenOverride, onProgress),
   );
 }
