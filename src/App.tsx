@@ -15,6 +15,14 @@ const scanProfileOptions = [
   { days: 7, label: 'Today - 7 days' },
 ];
 
+const defaultAdaptiveScanSettings = {
+  enabled: true,
+  min: 1,
+  start: 3,
+  max: 8,
+  stableWindow: 3,
+};
+
 const fabricSkuCapacities = [2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048];
 
 function App() {
@@ -27,6 +35,7 @@ function App() {
   const [scanTargetFactoryCount, setScanTargetFactoryCount] = useState(0);
   const [scanTargetSubscriptionIds, setScanTargetSubscriptionIds] = useState<string[]>([]);
   const [scanProfileDays, setScanProfileDays] = useState<number>(7);
+  const [adaptiveScanSettings, setAdaptiveScanSettings] = useState(defaultAdaptiveScanSettings);
   const [hideScannedFactories, setHideScannedFactories] = useState(false);
   const [subscriptionFilter, setSubscriptionFilter] = useState<string>('all');
   const [factoryTextFilter, setFactoryTextFilter] = useState('');
@@ -214,7 +223,7 @@ function App() {
     setMessage(`Scanning ${selectedFactoryIds.length} selected factories for activity runs and execution hours over the last ${scanProfileDays} days...`);
 
     try {
-      const run = await scanSelectedFactories(instance, latestRun.runId, selectedFactoryIds, scanProfileDays);
+      const run = await scanSelectedFactories(instance, latestRun.runId, selectedFactoryIds, scanProfileDays, adaptiveScanSettings);
       if (run.status === 'failed') {
         setMessage(`Usage scan finished with failures for run ${run.runId}. Check subscription status and usage rows.`);
       } else {
@@ -231,6 +240,13 @@ function App() {
     setSelectedFactoryIds((existing) =>
       existing.includes(factoryId) ? existing.filter((id) => id !== factoryId) : [...existing, factoryId],
     );
+  }
+
+  function updateAdaptiveSetting<K extends keyof typeof defaultAdaptiveScanSettings>(key: K, value: number | boolean): void {
+    setAdaptiveScanSettings((current) => ({
+      ...current,
+      [key]: value,
+    }));
   }
 
   function selectAllFactories(): void {
@@ -517,6 +533,63 @@ function App() {
                     <option key={option.days} value={option.days}>{option.label}</option>
                   ))}
                 </select>
+              </label>
+              <label className="selection-toolbar__profile tooltip" data-tooltip="Let the backend increase concurrency after stable requests and reduce it when Azure throttles.">
+                <span>Adaptive scan</span>
+                <input
+                  type="checkbox"
+                  checked={adaptiveScanSettings.enabled}
+                  onChange={(event) => updateAdaptiveSetting('enabled', event.target.checked)}
+                  disabled={isRunning}
+                  aria-label="Enable adaptive scan tuning"
+                  title="Let the backend tune concurrency automatically using successful requests and Azure throttling signals."
+                />
+              </label>
+              <div className="selection-toolbar__profile selection-toolbar__profile--compact tooltip" data-tooltip="Min is the safety floor, Start is the initial concurrency, and Max is the adaptive ceiling.">
+                <span>Min / Start / Max</span>
+                <div className="inline-numeric-controls">
+                  <input
+                    type="number"
+                    min={1}
+                    max={adaptiveScanSettings.max}
+                    value={adaptiveScanSettings.min}
+                    onChange={(event) => updateAdaptiveSetting('min', Math.max(1, Number(event.target.value) || 1))}
+                    disabled={isRunning || !adaptiveScanSettings.enabled}
+                    aria-label="Minimum adaptive concurrency"
+                    title="Minimum concurrency: the lowest parallel request limit after throttling."
+                  />
+                  <input
+                    type="number"
+                    min={adaptiveScanSettings.min}
+                    max={adaptiveScanSettings.max}
+                    value={adaptiveScanSettings.start}
+                    onChange={(event) => updateAdaptiveSetting('start', Math.max(adaptiveScanSettings.min, Number(event.target.value) || adaptiveScanSettings.min))}
+                    disabled={isRunning || !adaptiveScanSettings.enabled}
+                    aria-label="Starting adaptive concurrency"
+                    title="Starting concurrency: the parallel request limit used when the scan begins."
+                  />
+                  <input
+                    type="number"
+                    min={adaptiveScanSettings.start}
+                    value={adaptiveScanSettings.max}
+                    onChange={(event) => updateAdaptiveSetting('max', Math.max(adaptiveScanSettings.start, Number(event.target.value) || adaptiveScanSettings.start))}
+                    disabled={isRunning || !adaptiveScanSettings.enabled}
+                    aria-label="Maximum adaptive concurrency"
+                    title="Maximum concurrency: the adaptive ceiling for parallel requests."
+                  />
+                </div>
+              </div>
+              <label className="selection-toolbar__profile selection-toolbar__profile--compact tooltip" data-tooltip="Number of successful requests needed before adaptive concurrency increases by one.">
+                <span>Stable window</span>
+                <input
+                  type="number"
+                  min={1}
+                  value={adaptiveScanSettings.stableWindow}
+                  onChange={(event) => updateAdaptiveSetting('stableWindow', Math.max(1, Number(event.target.value) || 1))}
+                  disabled={isRunning || !adaptiveScanSettings.enabled}
+                  aria-label="Adaptive stable success window"
+                  title="Stable window: successful requests required before concurrency ramps up."
+                />
               </label>
               <button className="button button--secondary" type="button" onClick={selectAllFactories} disabled={visibleFactories.length === 0 || isRunning}>
                 Select all

@@ -31,6 +31,14 @@ interface BackendRunResultsResponse {
   usage: FactoryUsageRecord[];
 }
 
+export interface AdaptiveScanSettings {
+  enabled?: boolean;
+  min?: number;
+  start?: number;
+  max?: number;
+  stableWindow?: number;
+}
+
 async function sleep(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -327,6 +335,7 @@ export async function scanSelectedFactories(
   runId: string,
   selectedFactoryIds: string[],
   windowDays: number,
+  adaptiveSettings?: AdaptiveScanSettings,
 ): Promise<RunRecord> {
   if (selectedFactoryIds.length === 0) {
     throw new Error('Select at least one factory before starting the usage scan.');
@@ -381,6 +390,13 @@ export async function scanSelectedFactories(
       method: 'POST',
       body: JSON.stringify({
         windowDays,
+        adaptive: adaptiveSettings ?? {
+          enabled: true,
+          min: 1,
+          start: 3,
+          max: 8,
+          stableWindow: 3,
+        },
         ...(accessToken ? { accessToken } : {}),
         factories: selectedFactories.map((factory) => ({
           id: factory.id,
