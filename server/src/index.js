@@ -54,6 +54,7 @@ function normalizeCreateRunRequest(body) {
   const factoriesRaw = body.factories;
   const windowDaysRaw = body.windowDays;
   const accessTokenRaw = body.accessToken;
+  const adaptiveRaw = body.adaptive;
 
   if (!Array.isArray(factoriesRaw) || factoriesRaw.length === 0) {
     throw new Error('factories must be a non-empty array.');
@@ -75,7 +76,44 @@ function normalizeCreateRunRequest(body) {
 
   const accessToken = typeof accessTokenRaw === 'string' && accessTokenRaw.trim().length > 0 ? accessTokenRaw.trim() : undefined;
 
-  return { factories, windowDays, accessToken };
+  let adaptive = undefined;
+  if (adaptiveRaw !== undefined) {
+    if (adaptiveRaw === null || typeof adaptiveRaw !== 'object') {
+      throw new Error('adaptive must be an object when provided.');
+    }
+
+    const enabled = adaptiveRaw.enabled === undefined ? true : Boolean(adaptiveRaw.enabled);
+    const toInt = (value, fallback, label) => {
+      const parsed = Number(value ?? fallback);
+      if (!Number.isFinite(parsed) || Math.trunc(parsed) !== parsed || parsed < 1) {
+        throw new Error(`${label} must be a whole number greater than or equal to 1.`);
+      }
+      return parsed;
+    };
+
+    const min = toInt(adaptiveRaw.min, 1, 'adaptive.min');
+    const start = toInt(adaptiveRaw.start, 3, 'adaptive.start');
+    const max = toInt(adaptiveRaw.max, 8, 'adaptive.max');
+    const stableWindow = toInt(adaptiveRaw.stableWindow, 3, 'adaptive.stableWindow');
+
+    if (min > start) {
+      throw new Error('adaptive.min cannot be larger than adaptive.start.');
+    }
+
+    if (start > max) {
+      throw new Error('adaptive.start cannot be larger than adaptive.max.');
+    }
+
+    adaptive = {
+      enabled,
+      min,
+      start,
+      max,
+      stableWindow,
+    };
+  }
+
+  return { factories, windowDays, accessToken, adaptive };
 }
 
 function getRunIdFromPath(pathname, suffix) {
@@ -192,7 +230,12 @@ const server = createServer(async (req, res) => {
         logRunAction(run.runId, 'Run started.');
 
         try {
-          const results = await scanFactories(run.runId, payload.factories, payload.windowDays, payload.accessToken, async (usage) => {
+          const results = await scanFactories(
+            run.runId,
+            payload.factories,
+            payload.windowDays,
+            payload.accessToken,
+            async (usage) => {
             upsertUsage(run.runId, usage);
             logRunAction(
               run.runId,
@@ -219,7 +262,9 @@ const server = createServer(async (req, res) => {
             const currentUsage = getUsage(run.runId);
             const completedFactoryCount = currentUsage.filter((row) => row.status === 'collected' || row.status === 'failed').length;
             logRunAction(run.runId, `Progress: factories ${completedFactoryCount}/${run.factoryCount}.`);
-          });
+            },
+            payload.adaptive,
+          );
 
           results.forEach((result) => upsertUsage(run.runId, result));
           const finalizedUsage = getUsage(run.runId);
