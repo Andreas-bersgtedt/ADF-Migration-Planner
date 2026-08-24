@@ -359,6 +359,51 @@ select {
   padding: 7px 10px;
 }
 
+.tooltip {
+  position: relative;
+}
+
+.tooltip::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  z-index: 10;
+  left: 50%;
+  bottom: calc(100% + 8px);
+  width: max-content;
+  max-width: 280px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: #14213d;
+  color: #fff;
+  box-shadow: 0 8px 18px rgba(20, 33, 61, 0.18);
+  font-size: 0.78rem;
+  line-height: 1.35;
+  pointer-events: none;
+  opacity: 0;
+  transform: translate(-50%, 4px);
+  transition: opacity 120ms ease, transform 120ms ease;
+}
+
+.tooltip:hover::after,
+.tooltip:focus-within::after {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+
+.selection-toolbar__profile--compact input[type="number"] {
+  width: 52px;
+  border: 1px solid rgba(20, 33, 61, 0.16);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.9);
+  padding: 7px 6px;
+  color: #233;
+}
+
+.inline-numeric-controls {
+  display: inline-flex;
+  gap: 4px;
+}
+
 .filter-toolbar {
   display: grid;
   grid-template-columns: 1fr 1fr auto;

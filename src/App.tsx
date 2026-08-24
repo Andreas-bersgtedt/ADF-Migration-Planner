@@ -534,16 +534,18 @@ function App() {
                   ))}
                 </select>
               </label>
-              <label className="selection-toolbar__profile">
+              <label className="selection-toolbar__profile tooltip" data-tooltip="Let the backend increase concurrency after stable requests and reduce it when Azure throttles.">
                 <span>Adaptive scan</span>
                 <input
                   type="checkbox"
                   checked={adaptiveScanSettings.enabled}
                   onChange={(event) => updateAdaptiveSetting('enabled', event.target.checked)}
                   disabled={isRunning}
+                  aria-label="Enable adaptive scan tuning"
+                  title="Let the backend tune concurrency automatically using successful requests and Azure throttling signals."
                 />
               </label>
-              <div className="selection-toolbar__profile selection-toolbar__profile--compact">
+              <div className="selection-toolbar__profile selection-toolbar__profile--compact tooltip" data-tooltip="Min is the safety floor, Start is the initial concurrency, and Max is the adaptive ceiling.">
                 <span>Min / Start / Max</span>
                 <div className="inline-numeric-controls">
                   <input
@@ -553,6 +555,8 @@ function App() {
                     value={adaptiveScanSettings.min}
                     onChange={(event) => updateAdaptiveSetting('min', Math.max(1, Number(event.target.value) || 1))}
                     disabled={isRunning || !adaptiveScanSettings.enabled}
+                    aria-label="Minimum adaptive concurrency"
+                    title="Minimum concurrency: the lowest parallel request limit after throttling."
                   />
                   <input
                     type="number"
@@ -561,6 +565,8 @@ function App() {
                     value={adaptiveScanSettings.start}
                     onChange={(event) => updateAdaptiveSetting('start', Math.max(adaptiveScanSettings.min, Number(event.target.value) || adaptiveScanSettings.min))}
                     disabled={isRunning || !adaptiveScanSettings.enabled}
+                    aria-label="Starting adaptive concurrency"
+                    title="Starting concurrency: the parallel request limit used when the scan begins."
                   />
                   <input
                     type="number"
@@ -568,10 +574,12 @@ function App() {
                     value={adaptiveScanSettings.max}
                     onChange={(event) => updateAdaptiveSetting('max', Math.max(adaptiveScanSettings.start, Number(event.target.value) || adaptiveScanSettings.start))}
                     disabled={isRunning || !adaptiveScanSettings.enabled}
+                    aria-label="Maximum adaptive concurrency"
+                    title="Maximum concurrency: the adaptive ceiling for parallel requests."
                   />
                 </div>
               </div>
-              <label className="selection-toolbar__profile selection-toolbar__profile--compact">
+              <label className="selection-toolbar__profile selection-toolbar__profile--compact tooltip" data-tooltip="Number of successful requests needed before adaptive concurrency increases by one.">
                 <span>Stable window</span>
                 <input
                   type="number"
@@ -579,6 +587,8 @@ function App() {
                   value={adaptiveScanSettings.stableWindow}
                   onChange={(event) => updateAdaptiveSetting('stableWindow', Math.max(1, Number(event.target.value) || 1))}
                   disabled={isRunning || !adaptiveScanSettings.enabled}
+                  aria-label="Adaptive stable success window"
+                  title="Stable window: successful requests required before concurrency ramps up."
                 />
               </label>
               <button className="button button--secondary" type="button" onClick={selectAllFactories} disabled={visibleFactories.length === 0 || isRunning}>
