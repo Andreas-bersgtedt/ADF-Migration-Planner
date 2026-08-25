@@ -83,6 +83,13 @@ function createAdaptiveConcurrencyController(initialLimit, minLimit, maxLimit, s
   let cooldownUntil = 0;
   let stableSuccessCount = 0;
   const enabled = options.enabled !== false;
+  const limitChangeListeners = new Set();
+
+  function notifyLimitChange() {
+    for (const listener of limitChangeListeners) {
+      listener();
+    }
+  }
 
   return {
     isEnabled() {
@@ -96,6 +103,7 @@ function createAdaptiveConcurrencyController(initialLimit, minLimit, maxLimit, s
       const waitMs = Math.max(0, cooldownUntil - Date.now());
       if (waitMs > 0) {
         await delay(waitMs);
+        notifyLimitChange();
       }
     },
     getLimit() {
@@ -114,8 +122,12 @@ function createAdaptiveConcurrencyController(initialLimit, minLimit, maxLimit, s
 
       stableSuccessCount += 1;
       if (stableSuccessCount >= stableWindowSize) {
+        const previousLimit = currentLimit;
         currentLimit = clamp(currentLimit + 1, minLimit, maxLimit);
         stableSuccessCount = 0;
+        if (currentLimit !== previousLimit) {
+          notifyLimitChange();
+        }
       }
     },
     recordThrottle(retryAfterMs) {
@@ -124,18 +136,65 @@ function createAdaptiveConcurrencyController(initialLimit, minLimit, maxLimit, s
       }
 
       const throttleMs = Math.max(retryAfterMs ?? 1000, 1000);
+      const previousLimit = currentLimit;
       currentLimit = Math.max(minLimit, Math.floor(currentLimit / 2));
       cooldownUntil = Math.max(cooldownUntil, Date.now() + throttleMs);
       stableSuccessCount = 0;
+      if (currentLimit !== previousLimit) {
+        notifyLimitChange();
+      }
     },
     recordLowHeadroom() {
       if (!enabled) {
         return;
       }
 
+      const previousLimit = currentLimit;
       currentLimit = Math.max(minLimit, Math.floor(currentLimit * 0.75));
       cooldownUntil = Math.max(cooldownUntil, Date.now() + 2000);
       stableSuccessCount = 0;
+      if (currentLimit !== previousLimit) {
+        notifyLimitChange();
+      }
+    },
+    onLimitChange(listener) {
+      limitChangeListeners.add(listener);
+      return () => limitChangeListeners.delete(listener);
+    },
+  };
+}
+
+function createActivityQueryGate(controller, fixedLimit) {
+  const normalizedFixedLimit = Math.max(1, Math.trunc(Number(fixedLimit) || 1));
+  let activeCount = 0;
+  const waiting = [];
+
+  function getLimit() {
+    return controller.isEnabled() ? controller.getLimit() : normalizedFixedLimit;
+  }
+
+  function drain() {
+    while (waiting.length > 0 && activeCount < getLimit()) {
+      activeCount += 1;
+      waiting.shift()();
+    }
+  }
+
+  controller.onLimitChange(drain);
+
+  return {
+    async run(worker) {
+      await new Promise((resolve) => {
+        waiting.push(resolve);
+        drain();
+      });
+
+      try {
+        return await worker();
+      } finally {
+        activeCount -= 1;
+        drain();
+      }
     },
   };
 }
@@ -697,7 +756,15 @@ async function queryActivityRuns(subscriptionId, resourceGroup, factoryName, run
   return { activityRuns, pageCount };
 }
 
-async function scanFactory(runId, factory, windowDays, accessTokenOverride, onProgress, controller = adaptiveConcurrencyController) {
+async function scanFactory(
+  runId,
+  factory,
+  windowDays,
+  accessTokenOverride,
+  onProgress,
+  controller = adaptiveConcurrencyController,
+  activityQueryGate = createActivityQueryGate(controller, ACTIVITY_RUN_QUERY_CONCURRENCY),
+) {
   const now = new Date();
   const scanStartTime = Date.now();
   const effectiveWindowDays = Math.max(1, Math.min(7, Math.trunc(windowDays)));
@@ -786,24 +853,23 @@ async function scanFactory(runId, factory, windowDays, accessTokenOverride, onPr
         chunkPipelineExecutionMinutes += toDurationMinutes(pipelineRun.runStart, pipelineRun.runEnd);
       }
 
-      const runActivityMetrics = await mapWithConcurrency(
-        newPipelineRuns,
-        resolveAdaptiveConcurrency(ACTIVITY_RUN_QUERY_CONCURRENCY, controller),
-        async (pipelineRun) => {
-          try {
-            const activityRunsResult = await queryActivityRuns(
-              factory.subscriptionId,
-              factory.resourceGroup,
-              factory.name,
-              pipelineRun.runId,
-              dayWindow.lastUpdatedAfter,
-              dayWindow.lastUpdatedBefore,
-              accessTokenOverride,
-              controller,
-            );
-            const activityRuns = activityRunsResult.activityRuns;
-            usageRecord.apiCallMetrics.activityRunQueryCalls += 1;
-            usageRecord.apiCallMetrics.totalActivityQueryPages += activityRunsResult.pageCount;
+      const runActivityMetrics = await Promise.all(
+        newPipelineRuns.map((pipelineRun) =>
+          activityQueryGate.run(async () => {
+            try {
+              const activityRunsResult = await queryActivityRuns(
+                factory.subscriptionId,
+                factory.resourceGroup,
+                factory.name,
+                pipelineRun.runId,
+                dayWindow.lastUpdatedAfter,
+                dayWindow.lastUpdatedBefore,
+                accessTokenOverride,
+                controller,
+              );
+              const activityRuns = activityRunsResult.activityRuns;
+              usageRecord.apiCallMetrics.activityRunQueryCalls += 1;
+              usageRecord.apiCallMetrics.totalActivityQueryPages += activityRunsResult.pageCount;
 
             upsertActivityRuns(
               runId,
@@ -861,36 +927,37 @@ async function scanFactory(runId, factory, windowDays, accessTokenOverride, onPr
               totalCopyDataWrittenBytes += copyDataMovement.writtenBytes;
             }
 
-            return {
-              activityRunCount,
-              orchestrationActivityRunCount,
-              copyRunCount,
-              externalPipelineExecutionMinutes,
-              totalDiuHours,
-              mappingDataflowRunCount,
-              totalMappingDataflowVcoreMinutes,
-              totalCopyDataReadBytes,
-              totalCopyDataWrittenBytes,
-              failed: false,
-            };
-          } catch (error) {
-            const errorMessage = error instanceof Error ? error.message : 'activity run query failed';
-            recordScanError(runId, factory.id, dayWindow.label, `activity-runs:${pipelineRun.runId}`, errorMessage);
-            return {
-              activityRunCount: 0,
-              orchestrationActivityRunCount: 0,
-              copyRunCount: 0,
-              externalPipelineExecutionMinutes: 0,
-              totalDiuHours: 0,
-              mappingDataflowRunCount: 0,
-              totalMappingDataflowVcoreMinutes: 0,
-              totalCopyDataReadBytes: 0,
-              totalCopyDataWrittenBytes: 0,
-              failed: true,
-              errorMessage,
-            };
-          }
-        },
+              return {
+                activityRunCount,
+                orchestrationActivityRunCount,
+                copyRunCount,
+                externalPipelineExecutionMinutes,
+                totalDiuHours,
+                mappingDataflowRunCount,
+                totalMappingDataflowVcoreMinutes,
+                totalCopyDataReadBytes,
+                totalCopyDataWrittenBytes,
+                failed: false,
+              };
+            } catch (error) {
+              const errorMessage = error instanceof Error ? error.message : 'activity run query failed';
+              recordScanError(runId, factory.id, dayWindow.label, `activity-runs:${pipelineRun.runId}`, errorMessage);
+              return {
+                activityRunCount: 0,
+                orchestrationActivityRunCount: 0,
+                copyRunCount: 0,
+                externalPipelineExecutionMinutes: 0,
+                totalDiuHours: 0,
+                mappingDataflowRunCount: 0,
+                totalMappingDataflowVcoreMinutes: 0,
+                totalCopyDataReadBytes: 0,
+                totalCopyDataWrittenBytes: 0,
+                failed: true,
+                errorMessage,
+              };
+            }
+          }),
+        ),
       );
 
       let failedPipelineRunCountInChunk = 0;
@@ -1062,8 +1129,9 @@ async function scanFactory(runId, factory, windowDays, accessTokenOverride, onPr
 
 export async function scanFactories(runId, factories, windowDays, accessTokenOverride, onProgress, adaptiveSettings = DEFAULT_ADAPTIVE_CONCURRENCY) {
   const adaptiveController = createRunAdaptiveConcurrencyController(adaptiveSettings);
+  const activityQueryGate = createActivityQueryGate(adaptiveController, ACTIVITY_RUN_QUERY_CONCURRENCY);
   const adaptiveFactoryConcurrency = resolveAdaptiveConcurrency(FACTORY_SCAN_CONCURRENCY, adaptiveController);
   return mapWithConcurrency(factories, adaptiveFactoryConcurrency, async (factory) =>
-    scanFactory(runId, factory, windowDays, accessTokenOverride, onProgress, adaptiveController),
+    scanFactory(runId, factory, windowDays, accessTokenOverride, onProgress, adaptiveController, activityQueryGate),
   );
 }

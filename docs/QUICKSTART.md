@@ -124,6 +124,8 @@ SCAN_MAX_RETAINED_RUNS=50
 SCAN_DATABASE_PATH=server/data/adf-migration-planner.sqlite
 ```
 
+Activity-run queries share one global concurrency limit across every factory and day chunk. Adaptive scanning starts at `SCAN_ADAPTIVE_CONCURRENCY_START`, grows toward `SCAN_ADAPTIVE_CONCURRENCY_MAX` after stable responses, and falls toward `SCAN_ADAPTIVE_CONCURRENCY_MIN` when Azure throttles or reports low rate-limit headroom. When adaptive scanning is disabled, `SCAN_ACTIVITY_QUERY_CONCURRENCY` is the fixed global limit.
+
 The backend persists scan data in embedded SQLite at `server/data/adf-migration-planner.sqlite` by default. This includes activity start/end timestamps, pipeline runs, daily metrics, errors, and checkpoints. IndexedDB is used as a browser-side UI cache; SQLite is the authoritative scan store.
 
 Configuration checks:

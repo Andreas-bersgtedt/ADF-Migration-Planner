@@ -265,6 +265,8 @@ SCAN_MAX_RETAINED_RUNS=50
 SCAN_DATABASE_PATH=server/data/adf-migration-planner.sqlite
 ```
 
+Activity-run queries share one global concurrency limit across every factory and day chunk in a scan. With adaptive scanning enabled, `SCAN_ADAPTIVE_CONCURRENCY_START` (or the UI Start value) is the initial limit, successful requests increase it toward `SCAN_ADAPTIVE_CONCURRENCY_MAX`, and throttling or low rate-limit headroom decreases it toward `SCAN_ADAPTIVE_CONCURRENCY_MIN`. With adaptive scanning disabled, `SCAN_ACTIVITY_QUERY_CONCURRENCY` is the fixed global limit.
+
 The backend uses embedded SQLite as the authoritative local scan store. It persists runs, selected factories, factory summaries, daily metrics, pipeline runs, activity runs (including start/end timestamps), scan errors, and day checkpoints. The default database is `server/data/adf-migration-planner.sqlite`; no separate database service is required. Browser IndexedDB remains a UI cache for inventory and summary rendering.
 
 Available endpoints:
