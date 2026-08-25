@@ -124,7 +124,20 @@ SCAN_MAX_RETAINED_RUNS=50
 SCAN_DATABASE_PATH=server/data/adf-migration-planner.sqlite
 ```
 
-Activity-run queries share one global concurrency limit across every factory and day chunk. Adaptive scanning starts at `SCAN_ADAPTIVE_CONCURRENCY_START`, grows toward `SCAN_ADAPTIVE_CONCURRENCY_MAX` after stable responses, and falls toward `SCAN_ADAPTIVE_CONCURRENCY_MIN` when Azure throttles or reports low rate-limit headroom. When adaptive scanning is disabled, `SCAN_ACTIVITY_QUERY_CONCURRENCY` is the fixed global limit.
+### Adaptive scan settings
+
+Activity-run queries share one limit across every selected factory and day chunk. The scan form's **Min / Start / Max** and **Stable window** values override the `SCAN_ADAPTIVE_*` backend defaults for that run.
+
+1. **Start** is the initial number of concurrent activity-run traversals.
+2. **Stable window** is the number of successful ARM responses required to increase the limit by one.
+3. **Max** is the ceiling reached through successful responses.
+4. **Min** is the floor used after throttling or low rate-limit headroom.
+
+Azure `408`, `429`, and `5xx` responses reduce the limit and trigger retry backoff. Requests already running are allowed to finish; queued activity queries wait for capacity under the new limit. Pipeline and activity responses both contribute to adaptation, although the global gate applies only to activity-run traversals.
+
+Start with `1 / 3 / 8` and a stable window of `3`. For a shared or frequently throttled subscription, try `1 / 2 / 4` with a stable window of `10`. Increase the maximum only after completed scan notes show stable throughput without throttle failures.
+
+When adaptive scanning is disabled, `SCAN_ACTIVITY_QUERY_CONCURRENCY` becomes the fixed global activity-query limit. Environment values are read when the backend starts; restart the API after changing them. See [Adaptive scanning](../README.md#adaptive-scanning) for precedence, exact scale-down rules, and tuning guidance.
 
 The backend persists scan data in embedded SQLite at `server/data/adf-migration-planner.sqlite` by default. This includes activity start/end timestamps, pipeline runs, daily metrics, errors, and checkpoints. IndexedDB is used as a browser-side UI cache; SQLite is the authoritative scan store.
 

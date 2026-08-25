@@ -265,7 +265,97 @@ SCAN_MAX_RETAINED_RUNS=50
 SCAN_DATABASE_PATH=server/data/adf-migration-planner.sqlite
 ```
 
-Activity-run queries share one global concurrency limit across every factory and day chunk in a scan. With adaptive scanning enabled, `SCAN_ADAPTIVE_CONCURRENCY_START` (or the UI Start value) is the initial limit, successful requests increase it toward `SCAN_ADAPTIVE_CONCURRENCY_MAX`, and throttling or low rate-limit headroom decreases it toward `SCAN_ADAPTIVE_CONCURRENCY_MIN`. With adaptive scanning disabled, `SCAN_ACTIVITY_QUERY_CONCURRENCY` is the fixed global limit.
+### Adaptive scanning
+
+An ADF activity-run query is issued once for each pipeline execution. A factory with 1,000 pipeline executions therefore needs about 1,000 activity-run queries, plus any continuation-page requests. Adaptive scanning controls how many pipeline executions can have an activity-run traversal in progress at the same time.
+
+The activity-query limit is global to one scan run. Factories and day chunks do not receive separate allowances. For example, an effective limit of `6` permits at most six activity-run traversals across all factories and day chunks in that run. A traversal keeps its slot while it follows continuation tokens or retries a transient request.
+
+#### Settings
+
+| Setting | Default | Behavior |
+| --- | ---: | --- |
+| `SCAN_ACTIVITY_QUERY_CONCURRENCY` | `2` | Fixed global activity-query limit when adaptive scanning is disabled. |
+| `SCAN_ADAPTIVE_CONCURRENCY_MIN` | `1` | Lowest configured adaptive limit. |
+| `SCAN_ADAPTIVE_CONCURRENCY_START` | `3` | Effective activity-query limit at the start of a run. |
+| `SCAN_ADAPTIVE_CONCURRENCY_MAX` | `8` | Highest adaptive limit. |
+| `SCAN_ADAPTIVE_CONCURRENCY_STABLE_WINDOW` | `3` | Successful ARM responses required to raise the limit by one. |
+
+The scan form sends its **Min / Start / Max** and **Stable window** values with each run. Those values override the backend `SCAN_ADAPTIVE_*` defaults for that run. Direct API callers can send the same values in the `adaptive` object. If the request omits `adaptive`, the backend environment defaults apply.
+
+Disabling **Adaptive scan** makes `SCAN_ACTIVITY_QUERY_CONCURRENCY` the fixed global limit. The UI does not currently expose that fixed value, so set it in the backend process environment before starting the API.
+
+#### Runtime changes
+
+The backend maintains an effective runtime limit; it does not change the process environment variables.
+
+```mermaid
+flowchart TD
+   Start["Start scan run"] --> Mode{"Adaptive scan enabled?"}
+   Mode -->|No| Fixed["Set global activity limit from<br/>SCAN_ACTIVITY_QUERY_CONCURRENCY"]
+   Mode -->|Yes| Initial["Set runtime limit to Start<br/>bounded by Min and Max"]
+
+   Initial --> Discover["Fetch pipeline-run pages"]
+   Fixed --> Discover
+   Discover --> Queue["Queue one activity traversal<br/>per pipeline execution"]
+   Queue --> Capacity{"Active traversals below<br/>effective limit?"}
+   Capacity -->|No| Wait["Wait in global queue"]
+   Wait --> Capacity
+   Capacity -->|Yes| Traverse["Acquire slot and traverse<br/>activity-run pages sequentially"]
+   Traverse --> Outcome{"Traversal outcome"}
+   Outcome -->|Completed| Complete["Store activity runs<br/>and release slot"]
+   Outcome -->|Failed after retries| Failed["Record failure<br/>and release slot"]
+   Complete --> Next{"Queued traversals remain?"}
+   Failed --> Next
+   Next -->|Yes| Queue
+   Next -->|No| Done["Activity-query work complete"]
+
+   Discover -. "Pipeline responses" .-> Response{"ARM response signal"}
+   Traverse -. "Activity responses" .-> Response
+   Response -->|Success, headroom above 10| Stable["Increment stable-response count"]
+   Stable --> Window{"Stable window reached?"}
+   Window -->|Yes| Raise["Increase runtime limit by 1<br/>up to Max"]
+   Window -->|No| Keep["Keep current runtime limit"]
+
+   Response -->|Success, headroom 10 or less| Low["Reduce runtime limit to 75%<br/>and start 2-second cooldown"]
+   Response -->|408, 429, or 5xx| Throttle["Halve runtime limit and apply<br/>Azure retry delay or backoff"]
+   Raise -. "Admit queued work" .-> Capacity
+   Keep -.-> Capacity
+   Low -. "Hold new work during cooldown" .-> Capacity
+   Throttle -. "Hold new work during cooldown" .-> Capacity
+```
+
+1. The limit begins at **Start**.
+2. Each successful ARM response contributes to the stable-response counter. Pipeline-run pages and activity-run pages both count.
+3. After **Stable window** successful responses, the limit increases by one, up to **Max**.
+4. An HTTP `408`, `429`, or `5xx` response halves the configured runtime limit and honors Azure's retry delay. While the cooldown is active, the effective limit is reduced by one more slot, but never below **Min**.
+5. If an ARM rate-limit response header reports 10 or fewer remaining operations, the configured runtime limit falls to 75 percent of its current value and enters a two-second cooldown.
+6. A decrease does not cancel requests already in flight. New activity traversals wait until the active count falls below the new limit.
+
+Transient requests use exponential backoff when Azure does not provide a retry delay. They are retried up to `SCAN_ARM_FETCH_MAX_RETRIES`; retries continue to occupy the same activity-query slot.
+
+#### Outer concurrency
+
+Adaptive scanning directly gates activity-run traversal. Two separate settings control how quickly work reaches that gate:
+
+| Setting | Default | Scope |
+| --- | ---: | --- |
+| `SCAN_FACTORY_CONCURRENCY` | `2` | Factories processed concurrently. |
+| `SCAN_DAY_WINDOW_CONCURRENCY` | `3` | Day chunks processed concurrently within each factory. |
+
+Pipeline-run page requests are not admitted through the activity-query gate. They share the adaptive controller's success, throttle, and cooldown signals, so they can cause the activity limit to rise or fall. The factory and day worker counts are selected when their worker pools start and are not resized during that run.
+
+#### Tuning
+
+Use the defaults first. Change one boundary at a time and compare total calls, calls per second, scan duration, and throttle errors in the completed factory note.
+
+| Workload | Min | Start | Max | Stable window | Rationale |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Shared subscription or frequent throttling | 1 | 2 | 4 | 10 | Ramps slowly and keeps the peak request count low. |
+| General scan | 1 | 3 | 8 | 3 | Current default behavior. |
+| High-volume factory with observed rate-limit headroom | 2 | 6 | 12 | 10 | Starts faster but requires ten successful responses for each increase. |
+
+Do not set **Min** higher than the concurrency level Azure has sustained without throttling. A high minimum prevents the controller from reducing pressure far enough after a `429`. Raising **Max** only helps when enough pipeline executions are queued; it does not parallelize continuation pages for one pipeline execution.
 
 The backend uses embedded SQLite as the authoritative local scan store. It persists runs, selected factories, factory summaries, daily metrics, pipeline runs, activity runs (including start/end timestamps), scan errors, and day checkpoints. The default database is `server/data/adf-migration-planner.sqlite`; no separate database service is required. Browser IndexedDB remains a UI cache for inventory and summary rendering.
 
