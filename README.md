@@ -276,8 +276,10 @@ The trace records:
 2. Fixed and effective factory, day-window, and activity-query concurrency.
 3. Adaptive limit changes, cooldowns, and throttle signals.
 4. Azure CLI token command timing when CLI authentication is used.
-5. Every ARM request method, URL, payload, attempt, status, duration, retry delay, and failed response body up to 16 KiB.
+5. ARM failures, network errors, retry delays, status codes, durations, and failed response bodies up to 16 KiB.
 6. Factory, day-window, and pipeline-run context for failures, plus final throughput.
+
+**Verbose trace** is off by default. Enable it before starting a scan to also record `arm-request-started` and successful `arm-request-completed` events for every request attempt. These events include the request method, URL, payload, attempt number, duration, and remaining rate-limit value, and can add thousands of lines to a large scan log. Direct API callers can set `traceVerboseEnabled: true`; the default is `false`.
 
 Authorization headers, access tokens, client secrets, and fields whose names contain `token`, `secret`, or `authorization` are replaced with `[REDACTED]`. Logs are stored in `server/logs` by default. Set `SCAN_LOG_DIRECTORY` to an absolute path, or a path relative to the API process working directory, to store them elsewhere.
 

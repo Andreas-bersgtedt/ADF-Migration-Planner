@@ -38,6 +38,7 @@ function App() {
   const [scanProfileDays, setScanProfileDays] = useState<number>(7);
   const [adaptiveScanSettings, setAdaptiveScanSettings] = useState(defaultAdaptiveScanSettings);
   const [traceLogEnabled, setTraceLogEnabled] = useState(true);
+  const [traceVerboseEnabled, setTraceVerboseEnabled] = useState(false);
   const [scanLogRunId, setScanLogRunId] = useState<string | null>(null);
   const [hideScannedFactories, setHideScannedFactories] = useState(false);
   const [subscriptionFilter, setSubscriptionFilter] = useState<string>('all');
@@ -235,6 +236,7 @@ function App() {
         scanProfileDays,
         adaptiveScanSettings,
         traceLogEnabled,
+        traceVerboseEnabled,
         setScanLogRunId,
       );
       if (run.status === 'failed') {
@@ -569,6 +571,17 @@ function App() {
                   disabled={isRunning}
                   aria-label="Enable scan trace log"
                   title="Create a detailed trace log for this scan batch."
+                />
+              </label>
+              <label className="selection-toolbar__profile tooltip" data-tooltip="Also record every successful ARM request start and completion. This can make trace files much larger.">
+                <span>Verbose trace</span>
+                <input
+                  type="checkbox"
+                  checked={traceVerboseEnabled}
+                  onChange={(event) => setTraceVerboseEnabled(event.target.checked)}
+                  disabled={isRunning || !traceLogEnabled}
+                  aria-label="Enable verbose ARM request tracing"
+                  title="Include successful ARM request start and completion events."
                 />
               </label>
               <div className="selection-toolbar__profile selection-toolbar__profile--compact tooltip" data-tooltip="Min is the safety floor, Start is the initial concurrency, and Max is the adaptive ceiling.">

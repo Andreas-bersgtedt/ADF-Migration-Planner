@@ -62,6 +62,11 @@ function normalizeCreateRunRequest(body) {
   }
   const traceLogEnabled = body.traceLogEnabled ?? true;
 
+  if (body.traceVerboseEnabled !== undefined && typeof body.traceVerboseEnabled !== 'boolean') {
+    throw new Error('traceVerboseEnabled must be a boolean when provided.');
+  }
+  const traceVerboseEnabled = body.traceVerboseEnabled ?? false;
+
   if (!Array.isArray(factoriesRaw) || factoriesRaw.length === 0) {
     throw new Error('factories must be a non-empty array.');
   }
@@ -119,7 +124,7 @@ function normalizeCreateRunRequest(body) {
     };
   }
 
-  return { factories, windowDays, accessToken, adaptive, traceLogEnabled };
+  return { factories, windowDays, accessToken, adaptive, traceLogEnabled, traceVerboseEnabled };
 }
 
 function getRunIdFromPath(pathname, suffix) {
@@ -223,10 +228,13 @@ const server = createServer(async (req, res) => {
       const body = await readJsonBody(req);
       const payload = normalizeCreateRunRequest(body);
       const run = createRun(payload.windowDays, payload.factories.length);
-      const logger = payload.traceLogEnabled ? await createScanLogger(run.runId) : undefined;
+      const logger = payload.traceLogEnabled
+        ? await createScanLogger(run.runId, { verbose: payload.traceVerboseEnabled })
+        : undefined;
       await logger?.info('scan-batch-created', {
         windowDays: payload.windowDays,
         factoryCount: payload.factories.length,
+        traceVerboseEnabled: payload.traceVerboseEnabled,
         adaptive: payload.adaptive,
         factories: payload.factories.map((factory) => ({
           id: factory.id,

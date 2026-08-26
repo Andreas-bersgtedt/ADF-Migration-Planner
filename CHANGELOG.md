@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Factory inventory controls to enable or disable trace creation and download the current batch trace.
 - Run-scoped trace download endpoint at `GET /api/runs/<run-id>/log` with token and secret redaction.
 - In-app scan trace viewer with local file loading, live refresh, level/event/text filters, and expandable JSON entries.
+- Default-off verbose trace mode for successful ARM request start/completion events, keeping standard scan logs compact.
 
 ## [1.0.0] - 2026-07-29
 

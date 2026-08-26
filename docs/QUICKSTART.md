@@ -231,12 +231,13 @@ Then open the shown local URL (default `http://localhost:5173`).
 3. In **Factory inventory**, filter/search and select the factories to scan.
 4. Pick a **Scan profile** (1, 3, 5, or 7 days).
 5. Leave **Trace log** enabled to create a separate diagnostic file for this scan, or disable it when no trace is needed.
-6. Click **Scan selected factories**.
-7. Use **Download trace log** beside the scan button to retrieve the file during or after the scan.
-8. In **Scan trace viewer**, load the current trace or open a downloaded trace file. Filter by level, event, or text, then select a row to inspect its JSON.
-9. Review the **Usage summary** table. Results are retained across scans until you click **Clear results**.
-10. Optional: enable **Debug mode** in Execution status to show the **Debug trace** panel for step-by-step diagnostics.
-11. Optional: click **Export to Excel** to download the current results.
+6. Leave **Verbose trace** disabled for a compact diagnostic log. Enable it only when every successful ARM request start and completion is needed.
+7. Click **Scan selected factories**.
+8. Use **Download trace log** beside the scan button to retrieve the file during or after the scan.
+9. In **Scan trace viewer**, load the current trace or open a downloaded trace file. Filter by level, event, or text, then select a row to inspect its JSON.
+10. Review the **Usage summary** table. Results are retained across scans until you click **Clear results**.
+11. Optional: enable **Debug mode** in Execution status to show the **Debug trace** panel for step-by-step diagnostics.
+12. Optional: click **Export to Excel** to download the current results.
 
 ---
 

@@ -31,7 +31,7 @@ function sanitize(value, key = '') {
   return value;
 }
 
-export async function createScanLogger(runId) {
+export async function createScanLogger(runId, options = {}) {
   await mkdir(logDirectory, { recursive: true });
   const filePath = getLogPath(runId);
   const file = await open(filePath, 'wx');
@@ -59,6 +59,7 @@ export async function createScanLogger(runId) {
     info: (event, details) => write('info', event, details),
     warn: (event, details) => write('warn', event, details),
     error: (event, details) => write('error', event, details),
+    verbose: options.verbose ? (event, details) => write('info', event, details) : async () => {},
     flush: () => pendingWrite,
   };
 }

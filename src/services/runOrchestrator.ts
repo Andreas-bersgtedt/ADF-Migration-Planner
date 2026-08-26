@@ -351,6 +351,7 @@ export async function scanSelectedFactories(
   windowDays: number,
   adaptiveSettings?: AdaptiveScanSettings,
   traceLogEnabled = true,
+  traceVerboseEnabled = false,
   onTraceLogCreated?: (backendRunId: string) => void,
 ): Promise<RunRecord> {
   if (selectedFactoryIds.length === 0) {
@@ -407,6 +408,7 @@ export async function scanSelectedFactories(
       body: JSON.stringify({
         windowDays,
         traceLogEnabled,
+        traceVerboseEnabled,
         adaptive: adaptiveSettings ?? {
           enabled: true,
           min: 1,

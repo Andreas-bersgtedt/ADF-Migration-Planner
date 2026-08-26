@@ -647,7 +647,7 @@ async function armFetch(url, init, accessTokenOverride, controller = adaptiveCon
     const timeoutHandle = setTimeout(() => abortController.abort(), timeoutMs);
     let response;
     const attemptStartedAt = Date.now();
-    await logger?.info('arm-request-started', {
+    await logger?.verbose('arm-request-started', {
       requestId,
       attempt: attempt + 1,
       maxAttempts: maxRetries + 1,
@@ -673,6 +673,9 @@ async function armFetch(url, init, accessTokenOverride, controller = adaptiveCon
       await logger?.warn('arm-request-error', {
         requestId,
         attempt: attempt + 1,
+        method,
+        url,
+        requestBody,
         durationMs: Date.now() - attemptStartedAt,
         errorName: error instanceof Error ? error.name : undefined,
         errorMessage,
@@ -696,7 +699,7 @@ async function armFetch(url, init, accessTokenOverride, controller = adaptiveCon
 
     if (response.ok) {
       const remainingRateLimit = getLowRemainingRateLimit(response.headers);
-      await logger?.info('arm-request-completed', {
+      await logger?.verbose('arm-request-completed', {
         requestId,
         attempt: attempt + 1,
         status: response.status,
@@ -717,6 +720,9 @@ async function armFetch(url, init, accessTokenOverride, controller = adaptiveCon
     await logger?.warn('arm-request-failed', {
       requestId,
       attempt: attempt + 1,
+      method,
+      url,
+      requestBody,
       status: response.status,
       durationMs: Date.now() - attemptStartedAt,
       responseBody: body.slice(0, 16384),
