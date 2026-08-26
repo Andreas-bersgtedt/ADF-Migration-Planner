@@ -142,6 +142,8 @@ Start with `1 / 3 / 8` and a stable window of `3`. For a shared or frequently th
 
 When adaptive scanning is disabled, `SCAN_ACTIVITY_QUERY_CONCURRENCY` becomes the fixed global activity-query limit. Environment values are read when the backend starts; restart the API after changing them. See [Adaptive scanning](../README.md#adaptive-scanning) for precedence, exact scale-down rules, and tuning guidance.
 
+Azure Data Factory allows 1,000 monitoring queries per minute. A `429` with code `TooManyPipelineRunQueryRequests` means the factory named in the response reached that fixed service limit. The scanner reduces concurrency and retries automatically. Start with **Min / Start / Max** set to `1 / 2 / 6` and **Stable window** set to `10`; lower **Max** to `4` if the trace shows frequent occurrences. See [ADF monitoring-query limit](../README.md#adf-monitoring-query-limit) for scope and troubleshooting details.
+
 The backend persists scan data in embedded SQLite at `server/data/adf-migration-planner.sqlite` by default. This includes activity start/end timestamps, pipeline runs, daily metrics, errors, and checkpoints. IndexedDB is used as a browser-side UI cache; SQLite is the authoritative scan store.
 
 Configuration checks:

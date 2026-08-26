@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Run-scoped trace download endpoint at `GET /api/runs/<run-id>/log` with token and secret redaction.
 - In-app scan trace viewer with local file loading, live refresh, level/event/text filters, and expandable JSON entries.
 - Default-off verbose trace mode for successful ARM request start/completion events, keeping standard scan logs compact.
+- Documentation for ADF's fixed 1,000 monitoring-queries-per-minute limit, `TooManyPipelineRunQueryRequests`, and adaptive tuning guidance.
 
 ## [1.0.0] - 2026-07-29
 

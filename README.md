@@ -307,6 +307,24 @@ The scan form sends its **Min / Start / Max** and **Stable window** values with 
 
 Disabling **Adaptive scan** makes `SCAN_ACTIVITY_QUERY_CONCURRENCY` the fixed global limit. The UI does not currently expose that fixed value, so set it in the backend process environment before starting the API.
 
+#### ADF monitoring-query limit
+
+Microsoft publishes an Azure Data Factory limit of **1,000 monitoring queries per minute**, with both the default and maximum set to `1,000`. This is an ADF service limit, separate from the Azure Resource Manager read limit of `12,500/hour`. The published table does not label the monitoring-query row's scope. When the service enforces the limit for this scanner, its `429` response identifies the affected factory resource:
+
+```text
+TooManyPipelineRunQueryRequests
+Number of pipeline run queries has been exceeded for resource '<factory>'.
+Maximum allowed number of run queries per minute is '1000'.
+```
+
+The scanner issues one pipeline-run query for each factory/day window, followed by an activity-run query for every discovered pipeline execution and any continuation pages. Those monitoring calls share the factory's service allowance. Other monitoring clients querying the same factory, including portal monitoring or automation, can consume the same allowance during a scan.
+
+The scanner treats this response as transient: it records `arm-request-failed`, lowers adaptive concurrency, honors the service retry delay when present, and retries. Recovered `429` responses do not make a day chunk fail. Repeated throttling still increases scan duration and can exhaust retries.
+
+Use `Min / Start / Max = 1 / 2 / 6` and `Stable window = 10` as the initial profile for an active factory. If `TooManyPipelineRunQueryRequests` remains frequent, reduce **Max** to `4`, increase **Stable window** to `15`, scan fewer factories at once, or avoid overlapping the scan with other monitoring tools. Raising **Max** cannot increase the fixed 1,000-query service limit.
+
+Official reference: [Azure Data Factory limits](https://learn.microsoft.com/azure/azure-resource-manager/management/azure-subscription-service-limits#azure-data-factory-limits).
+
 #### Runtime changes
 
 The backend maintains an effective runtime limit; it does not change the process environment variables.
@@ -507,6 +525,11 @@ Key calculations:
    - Keep **Trace log** enabled before starting the scan.
    - Download the trace after the failure and inspect `error`, `arm-request-failed`, `arm-request-error`, and `adaptive-concurrency-changed` events.
    - Confirm the trace's `scan-runtime-settings` event matches the intended scale and parallelism values.
+6. `TooManyPipelineRunQueryRequests` or HTTP `429`:
+   - ADF permits 1,000 monitoring queries per minute; the service response identifies the factory that reached the limit.
+   - Filter the scan trace to event `arm-request-failed` and search for `TooManyPipelineRunQueryRequests`.
+   - Start with adaptive settings `1 / 2 / 6`, stable window `10`; lower **Max** to `4` if throttling remains frequent.
+   - Avoid running portal or automated monitoring queries against the same factory during the scan.
 
 ## Build
 
@@ -522,3 +545,4 @@ npm run build
 4. [Azure Resource Graph REST syntax](https://learn.microsoft.com/azure/governance/resource-graph/first-query-rest-api#review-the-rest-api-syntax)
 5. [Data Factory pipeline runs query API](https://learn.microsoft.com/rest/api/datafactory/pipeline-runs/query-by-factory)
 6. [Data Factory activity runs query API](https://learn.microsoft.com/rest/api/datafactory/activity-runs/query-by-pipeline-run)
+7. [Azure Data Factory service limits](https://learn.microsoft.com/azure/azure-resource-manager/management/azure-subscription-service-limits#azure-data-factory-limits)
