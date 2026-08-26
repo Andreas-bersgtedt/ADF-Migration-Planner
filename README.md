@@ -263,7 +263,25 @@ SCAN_ADAPTIVE_CONCURRENCY_MAX=8
 SCAN_ADAPTIVE_CONCURRENCY_STABLE_WINDOW=3
 SCAN_MAX_RETAINED_RUNS=50
 SCAN_DATABASE_PATH=server/data/adf-migration-planner.sqlite
+SCAN_LOG_DIRECTORY=server/logs
 ```
+
+### Scan trace logs
+
+**Trace log** is enabled by default in the Factory inventory scan controls. Each click on **Scan selected factories** creates a separate JSON Lines file named `<backend-run-id>.jsonl`. Disable the toggle before starting a scan when no file should be written.
+
+The trace records:
+
+1. Selected factories and scan-window settings.
+2. Fixed and effective factory, day-window, and activity-query concurrency.
+3. Adaptive limit changes, cooldowns, and throttle signals.
+4. Azure CLI token command timing when CLI authentication is used.
+5. Every ARM request method, URL, payload, attempt, status, duration, retry delay, and failed response body up to 16 KiB.
+6. Factory, day-window, and pipeline-run context for failures, plus final throughput.
+
+Authorization headers, access tokens, client secrets, and fields whose names contain `token`, `secret`, or `authorization` are replaced with `[REDACTED]`. Logs are stored in `server/logs` by default. Set `SCAN_LOG_DIRECTORY` to an absolute path, or a path relative to the API process working directory, to store them elsewhere.
+
+After the backend accepts a trace-enabled scan, the UI shows **Download trace log** beside the scan button. The file can also be downloaded from `GET /api/runs/<backend-run-id>/log`, including while the scan is running.
 
 ### Adaptive scanning
 
@@ -481,6 +499,10 @@ Key calculations:
 4. Partial results:
    - Day-chunk scanning continues even when a chunk fails.
    - Check progress and rerun selected factories.
+5. Failed scan with no useful UI error:
+   - Keep **Trace log** enabled before starting the scan.
+   - Download the trace after the failure and inspect `error`, `arm-request-failed`, `arm-request-error`, and `adaptive-concurrency-changed` events.
+   - Confirm the trace's `scan-runtime-settings` event matches the intended scale and parallelism values.
 
 ## Build
 

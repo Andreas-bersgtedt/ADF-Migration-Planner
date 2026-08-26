@@ -50,6 +50,7 @@ const ORCHESTRATION_ACTIVITY_TYPES = new Set([
 
 let cachedToken = null;
 let confidentialClient = null;
+let armRequestSequence = 0;
 
 function utcNow() {
   return new Date().toISOString();
@@ -126,6 +127,7 @@ function createAdaptiveConcurrencyController(initialLimit, minLimit, maxLimit, s
         currentLimit = clamp(currentLimit + 1, minLimit, maxLimit);
         stableSuccessCount = 0;
         if (currentLimit !== previousLimit) {
+          options.onLimitChanged?.('stable-success', previousLimit, currentLimit, 0);
           notifyLimitChange();
         }
       }
@@ -141,6 +143,7 @@ function createAdaptiveConcurrencyController(initialLimit, minLimit, maxLimit, s
       cooldownUntil = Math.max(cooldownUntil, Date.now() + throttleMs);
       stableSuccessCount = 0;
       if (currentLimit !== previousLimit) {
+        options.onLimitChanged?.('throttle', previousLimit, currentLimit, throttleMs);
         notifyLimitChange();
       }
     },
@@ -154,6 +157,7 @@ function createAdaptiveConcurrencyController(initialLimit, minLimit, maxLimit, s
       cooldownUntil = Math.max(cooldownUntil, Date.now() + 2000);
       stableSuccessCount = 0;
       if (currentLimit !== previousLimit) {
+        options.onLimitChanged?.('low-rate-limit-headroom', previousLimit, currentLimit, 2000);
         notifyLimitChange();
       }
     },
@@ -206,14 +210,19 @@ const adaptiveConcurrencyController = createAdaptiveConcurrencyController(
   DEFAULT_ADAPTIVE_CONCURRENCY.stableWindow,
 );
 
-function createRunAdaptiveConcurrencyController(settings) {
+function createRunAdaptiveConcurrencyController(settings, logger) {
   const normalized = clampAdaptiveSettings(settings ?? DEFAULT_ADAPTIVE_CONCURRENCY);
   return createAdaptiveConcurrencyController(
     normalized.start,
     normalized.min,
     normalized.max,
     normalized.stableWindow,
-    { enabled: normalized.enabled },
+    {
+      enabled: normalized.enabled,
+      onLimitChanged: (reason, previousLimit, currentLimit, cooldownMs) => {
+        void logger?.info('adaptive-concurrency-changed', { reason, previousLimit, currentLimit, cooldownMs });
+      },
+    },
   );
 }
 
@@ -552,7 +561,11 @@ async function getClientSecretAccessToken() {
   };
 }
 
-async function getAzureCliAccessToken() {
+async function getAzureCliAccessToken(logger) {
+  await logger?.info('command-started', {
+    command: 'az account get-access-token --resource https://management.azure.com/ --output json',
+  });
+  const startedAt = Date.now();
   const { stdout } = await execFileAsync('az', [
     'account',
     'get-access-token',
@@ -561,6 +574,10 @@ async function getAzureCliAccessToken() {
     '--output',
     'json',
   ]);
+  await logger?.info('command-completed', {
+    command: 'az account get-access-token',
+    durationMs: Date.now() - startedAt,
+  });
 
   const payload = JSON.parse(stdout);
   return {
@@ -569,7 +586,7 @@ async function getAzureCliAccessToken() {
   };
 }
 
-async function getAccessToken() {
+async function getAccessToken(logger) {
   const now = Date.now();
   if (cachedToken && cachedToken.expiresOn > now + 2 * 60 * 1000) {
     return cachedToken.token;
@@ -577,7 +594,7 @@ async function getAccessToken() {
 
   cachedToken = BACKEND_AUTH_MODE === 'client-secret'
     ? await getClientSecretAccessToken()
-    : await getAzureCliAccessToken();
+    : await getAzureCliAccessToken(logger);
 
   return cachedToken.token;
 }
@@ -609,18 +626,37 @@ export async function getBackendIdentity() {
   }
 }
 
-async function armFetch(url, init, accessTokenOverride, controller = adaptiveConcurrencyController) {
-  const accessToken = accessTokenOverride ?? (await getAccessToken());
+async function armFetch(url, init, accessTokenOverride, controller = adaptiveConcurrencyController, logger) {
+  const accessToken = accessTokenOverride ?? (await getAccessToken(logger));
   const timeoutMs = Number.isFinite(ARM_FETCH_TIMEOUT_MS) && ARM_FETCH_TIMEOUT_MS > 0 ? ARM_FETCH_TIMEOUT_MS : 60000;
   const maxRetries = Number.isFinite(ARM_FETCH_MAX_RETRIES) && ARM_FETCH_MAX_RETRIES >= 0
     ? Math.trunc(ARM_FETCH_MAX_RETRIES)
     : 5;
+  const requestId = `arm-${Date.now()}-${++armRequestSequence}`;
+  const method = init?.method ?? 'GET';
+  let requestBody = init?.body;
+  try {
+    requestBody = typeof requestBody === 'string' ? JSON.parse(requestBody) : requestBody;
+  } catch {
+    // Keep a non-JSON body as text for diagnostics.
+  }
 
   for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
     await controller.waitForCooldown();
     const abortController = new AbortController();
     const timeoutHandle = setTimeout(() => abortController.abort(), timeoutMs);
     let response;
+    const attemptStartedAt = Date.now();
+    await logger?.info('arm-request-started', {
+      requestId,
+      attempt: attempt + 1,
+      maxAttempts: maxRetries + 1,
+      method,
+      url,
+      requestBody,
+      concurrencyLimit: controller.getLimit?.(),
+      timeoutMs,
+    });
 
     try {
       response = await fetch(url, {
@@ -633,8 +669,19 @@ async function armFetch(url, init, accessTokenOverride, controller = adaptiveCon
         },
       });
     } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      await logger?.warn('arm-request-error', {
+        requestId,
+        attempt: attempt + 1,
+        durationMs: Date.now() - attemptStartedAt,
+        errorName: error instanceof Error ? error.name : undefined,
+        errorMessage,
+        willRetry: attempt < maxRetries,
+      });
       if (attempt < maxRetries) {
-        await delay(Math.min(30000, 1000 * 2 ** attempt) + Math.floor(Math.random() * 500));
+        const retryDelayMs = Math.min(30000, 1000 * 2 ** attempt) + Math.floor(Math.random() * 500);
+        await logger?.info('arm-request-retry-scheduled', { requestId, retryDelayMs, reason: 'network-error' });
+        await delay(retryDelayMs);
         continue;
       }
 
@@ -649,6 +696,13 @@ async function armFetch(url, init, accessTokenOverride, controller = adaptiveCon
 
     if (response.ok) {
       const remainingRateLimit = getLowRemainingRateLimit(response.headers);
+      await logger?.info('arm-request-completed', {
+        requestId,
+        attempt: attempt + 1,
+        status: response.status,
+        durationMs: Date.now() - attemptStartedAt,
+        remainingRateLimit,
+      });
       if (controller.isEnabled?.() !== false) {
         if (remainingRateLimit !== null && remainingRateLimit <= 10) {
           controller.recordLowHeadroom();
@@ -660,6 +714,15 @@ async function armFetch(url, init, accessTokenOverride, controller = adaptiveCon
     }
 
     const body = await response.text();
+    await logger?.warn('arm-request-failed', {
+      requestId,
+      attempt: attempt + 1,
+      status: response.status,
+      durationMs: Date.now() - attemptStartedAt,
+      responseBody: body.slice(0, 16384),
+      transient: isTransientStatus(response.status),
+      willRetry: isTransientStatus(response.status) && attempt < maxRetries,
+    });
     if (!isTransientStatus(response.status) || attempt >= maxRetries) {
       throw new Error(`Azure request failed (${response.status}) after ${attempt + 1} attempt(s): ${body}`);
     }
@@ -668,6 +731,7 @@ async function armFetch(url, init, accessTokenOverride, controller = adaptiveCon
     if (controller.isEnabled?.() !== false) {
       controller.recordThrottle(retryDelayMs);
     }
+    await logger?.info('arm-request-retry-scheduled', { requestId, retryDelayMs, reason: `http-${response.status}` });
     await delay(retryDelayMs);
   }
 
@@ -708,7 +772,7 @@ export async function inventoryAzureFactories(subscriptionId) {
   }));
 }
 
-async function queryPipelineRuns(subscriptionId, resourceGroup, factoryName, lastUpdatedAfter, lastUpdatedBefore, accessTokenOverride, controller = adaptiveConcurrencyController) {
+async function queryPipelineRuns(subscriptionId, resourceGroup, factoryName, lastUpdatedAfter, lastUpdatedBefore, accessTokenOverride, controller = adaptiveConcurrencyController, logger) {
   const endpoint = `${ARM_ENDPOINT}/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}/providers/Microsoft.DataFactory/factories/${factoryName}/queryPipelineRuns?api-version=2018-06-01`;
   const runs = [];
   let continuationToken;
@@ -718,7 +782,7 @@ async function queryPipelineRuns(subscriptionId, resourceGroup, factoryName, las
     const page = await armFetch(endpoint, {
       method: 'POST',
       body: JSON.stringify({ lastUpdatedAfter, lastUpdatedBefore, continuationToken }),
-    }, accessTokenOverride, controller);
+    }, accessTokenOverride, controller, logger);
 
     pageCount += 1;
     runs.push(...(page.value ?? []));
@@ -732,7 +796,7 @@ async function queryPipelineRuns(subscriptionId, resourceGroup, factoryName, las
   return { runs, pageCount };
 }
 
-async function queryActivityRuns(subscriptionId, resourceGroup, factoryName, runId, lastUpdatedAfter, lastUpdatedBefore, accessTokenOverride, controller = adaptiveConcurrencyController) {
+async function queryActivityRuns(subscriptionId, resourceGroup, factoryName, runId, lastUpdatedAfter, lastUpdatedBefore, accessTokenOverride, controller = adaptiveConcurrencyController, logger) {
   const endpoint = `${ARM_ENDPOINT}/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}/providers/Microsoft.DataFactory/factories/${factoryName}/pipelineruns/${runId}/queryActivityruns?api-version=2018-06-01`;
   const activityRuns = [];
   let continuationToken;
@@ -742,7 +806,7 @@ async function queryActivityRuns(subscriptionId, resourceGroup, factoryName, run
     const page = await armFetch(endpoint, {
       method: 'POST',
       body: JSON.stringify({ lastUpdatedAfter, lastUpdatedBefore, continuationToken }),
-    }, accessTokenOverride, controller);
+    }, accessTokenOverride, controller, logger);
 
     pageCount += 1;
     activityRuns.push(...(page.value ?? []));
@@ -764,11 +828,20 @@ async function scanFactory(
   onProgress,
   controller = adaptiveConcurrencyController,
   activityQueryGate = createActivityQueryGate(controller, ACTIVITY_RUN_QUERY_CONCURRENCY),
+  logger,
 ) {
   const now = new Date();
   const scanStartTime = Date.now();
   const effectiveWindowDays = Math.max(1, Math.min(7, Math.trunc(windowDays)));
   const dayWindows = buildDayWindows(effectiveWindowDays, now);
+  await logger?.info('factory-scan-started', {
+    factoryId: factory.id,
+    factoryName: factory.name,
+    subscriptionId: factory.subscriptionId,
+    resourceGroup: factory.resourceGroup,
+    windowDays: effectiveWindowDays,
+    dayWindowCount: dayWindows.length,
+  });
 
   const usageRecord = {
     id: `${runId}:${factory.id}`,
@@ -819,6 +892,13 @@ async function scanFactory(
   const adaptiveDayWindowConcurrency = resolveAdaptiveConcurrency(DAY_WINDOW_CONCURRENCY, controller);
   await mapWithConcurrency(dayWindows, adaptiveDayWindowConcurrency, async (dayWindow) => {
     upsertCheckpoint(runId, factory.id, dayWindow.label, 'running');
+    await logger?.info('day-window-started', {
+      factoryId: factory.id,
+      factoryName: factory.name,
+      metricDate: dayWindow.label,
+      windowStartUtc: dayWindow.lastUpdatedAfter,
+      windowEndUtc: dayWindow.lastUpdatedBefore,
+    });
 
     try {
       const pipelineRunsResult = await queryPipelineRuns(
@@ -829,6 +909,7 @@ async function scanFactory(
         dayWindow.lastUpdatedBefore,
         accessTokenOverride,
         controller,
+        logger,
       );
       const pipelineRuns = pipelineRunsResult.runs;
       usageRecord.apiCallMetrics.pipelineRunQueryCalls += 1;
@@ -866,6 +947,7 @@ async function scanFactory(
                 dayWindow.lastUpdatedBefore,
                 accessTokenOverride,
                 controller,
+                logger,
               );
               const activityRuns = activityRunsResult.activityRuns;
               usageRecord.apiCallMetrics.activityRunQueryCalls += 1;
@@ -941,6 +1023,13 @@ async function scanFactory(
               };
             } catch (error) {
               const errorMessage = error instanceof Error ? error.message : 'activity run query failed';
+              await logger?.error('activity-query-failed', {
+                factoryId: factory.id,
+                metricDate: dayWindow.label,
+                pipelineRunId: pipelineRun.runId,
+                errorMessage,
+                stack: error instanceof Error ? error.stack : undefined,
+              });
               recordScanError(runId, factory.id, dayWindow.label, `activity-runs:${pipelineRun.runId}`, errorMessage);
               return {
                 activityRunCount: 0,
@@ -1048,8 +1137,23 @@ async function scanFactory(
         estimatedFabricCuh: chunkEstimatedFabricCuhTotal,
         status: chunkStatus,
       });
+      await logger?.info('day-window-completed', {
+        factoryId: factory.id,
+        metricDate: dayWindow.label,
+        status: chunkStatus,
+        pipelineRunCount: newPipelineRuns.length,
+        activityRunCount: chunkActivityRunCount,
+        failedActivityQueries: failedPipelineRunCountInChunk,
+      });
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'chunk failed';
+      await logger?.error('day-window-failed', {
+        factoryId: factory.id,
+        factoryName: factory.name,
+        metricDate: dayWindow.label,
+        errorMessage,
+        stack: error instanceof Error ? error.stack : undefined,
+      });
       recordScanError(runId, factory.id, dayWindow.label, 'day-chunk', errorMessage);
       upsertDailyMetric(runId, factory.id, {
         metricDate: dayWindow.label,
@@ -1122,16 +1226,43 @@ async function scanFactory(
   usageRecord.note = `${usageRecord.note} | Throughput: ${totalApiCalls} API calls (${avgCallsPerSecond}/sec, ${avgCallDurationMs}ms/call).`;
 
   console.log(`✓ ${usageRecord.factoryName}: ${usageRecord.note}`);
+  await logger?.info('factory-scan-completed', {
+    factoryId: factory.id,
+    factoryName: factory.name,
+    status: usageRecord.status,
+    scannedDayChunks: usageRecord.scannedDayChunks,
+    failedDayChunks: usageRecord.failedDayChunks,
+    totalApiCalls,
+    scanDurationMs,
+    avgCallsPerSecond: usageRecord.apiCallMetrics.avgCallsPerSecond,
+  });
 
   usageRecord.updatedAtUtc = utcNow();
   return usageRecord;
 }
 
-export async function scanFactories(runId, factories, windowDays, accessTokenOverride, onProgress, adaptiveSettings = DEFAULT_ADAPTIVE_CONCURRENCY) {
-  const adaptiveController = createRunAdaptiveConcurrencyController(adaptiveSettings);
+export async function scanFactories(runId, factories, windowDays, accessTokenOverride, onProgress, adaptiveSettings = DEFAULT_ADAPTIVE_CONCURRENCY, logger) {
+  const normalizedAdaptiveSettings = clampAdaptiveSettings(adaptiveSettings);
+  const adaptiveController = createRunAdaptiveConcurrencyController(normalizedAdaptiveSettings, logger);
   const activityQueryGate = createActivityQueryGate(adaptiveController, ACTIVITY_RUN_QUERY_CONCURRENCY);
   const adaptiveFactoryConcurrency = resolveAdaptiveConcurrency(FACTORY_SCAN_CONCURRENCY, adaptiveController);
+  await logger?.info('scan-runtime-settings', {
+    authMode: accessTokenOverride ? 'forwarded-access-token' : BACKEND_AUTH_MODE,
+    factoryCount: factories.length,
+    windowDays,
+    factoryScanConcurrency: FACTORY_SCAN_CONCURRENCY,
+    effectiveFactoryScanConcurrency: adaptiveFactoryConcurrency,
+    dayWindowConcurrency: DAY_WINDOW_CONCURRENCY,
+    effectiveDayWindowConcurrency: resolveAdaptiveConcurrency(DAY_WINDOW_CONCURRENCY, adaptiveController),
+    activityRunQueryConcurrency: ACTIVITY_RUN_QUERY_CONCURRENCY,
+    adaptive: normalizedAdaptiveSettings,
+    armFetchTimeoutMs: ARM_FETCH_TIMEOUT_MS,
+    armFetchMaxRetries: ARM_FETCH_MAX_RETRIES,
+    nodeVersion: process.version,
+    platform: process.platform,
+    processId: process.pid,
+  });
   return mapWithConcurrency(factories, adaptiveFactoryConcurrency, async (factory) =>
-    scanFactory(runId, factory, windowDays, accessTokenOverride, onProgress, adaptiveController, activityQueryGate),
+    scanFactory(runId, factory, windowDays, accessTokenOverride, onProgress, adaptiveController, activityQueryGate, logger),
   );
 }

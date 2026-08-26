@@ -5,7 +5,7 @@ import { isBackendAuth, isClientSecretAuth, isMsalConfigured, loginRequest, msal
 import { StatusCard } from './components/StatusCard';
 import { db } from './data/db';
 import { usePlannerData } from './hooks/usePlannerData';
-import { scanSelectedFactories, startInventoryRun } from './services/runOrchestrator';
+import { getScanLogUrl, scanSelectedFactories, startInventoryRun } from './services/runOrchestrator';
 import { exportUsageSummaryToExcel } from './utils/exportExcel';
 
 const scanProfileOptions = [
@@ -36,6 +36,8 @@ function App() {
   const [scanTargetSubscriptionIds, setScanTargetSubscriptionIds] = useState<string[]>([]);
   const [scanProfileDays, setScanProfileDays] = useState<number>(7);
   const [adaptiveScanSettings, setAdaptiveScanSettings] = useState(defaultAdaptiveScanSettings);
+  const [traceLogEnabled, setTraceLogEnabled] = useState(true);
+  const [scanLogRunId, setScanLogRunId] = useState<string | null>(null);
   const [hideScannedFactories, setHideScannedFactories] = useState(false);
   const [subscriptionFilter, setSubscriptionFilter] = useState<string>('all');
   const [factoryTextFilter, setFactoryTextFilter] = useState('');
@@ -218,12 +220,21 @@ function App() {
     setScanTargetFactoryIds(selectedFactoryIds);
     setScanTargetFactoryCount(selectedFactoryIds.length);
     setScanTargetSubscriptionIds(subscriptionIds);
+    setScanLogRunId(null);
 
     setIsRunning(true);
     setMessage(`Scanning ${selectedFactoryIds.length} selected factories for activity runs and execution hours over the last ${scanProfileDays} days...`);
 
     try {
-      const run = await scanSelectedFactories(instance, latestRun.runId, selectedFactoryIds, scanProfileDays, adaptiveScanSettings);
+      const run = await scanSelectedFactories(
+        instance,
+        latestRun.runId,
+        selectedFactoryIds,
+        scanProfileDays,
+        adaptiveScanSettings,
+        traceLogEnabled,
+        setScanLogRunId,
+      );
       if (run.status === 'failed') {
         setMessage(`Usage scan finished with failures for run ${run.runId}. Check subscription status and usage rows.`);
       } else {
@@ -545,6 +556,17 @@ function App() {
                   title="Let the backend tune concurrency automatically using successful requests and Azure throttling signals."
                 />
               </label>
+              <label className="selection-toolbar__profile tooltip" data-tooltip="Write a detailed, unique trace file for this scan batch, including runtime settings, requests, retries, and failures.">
+                <span>Trace log</span>
+                <input
+                  type="checkbox"
+                  checked={traceLogEnabled}
+                  onChange={(event) => setTraceLogEnabled(event.target.checked)}
+                  disabled={isRunning}
+                  aria-label="Enable scan trace log"
+                  title="Create a detailed trace log for this scan batch."
+                />
+              </label>
               <div className="selection-toolbar__profile selection-toolbar__profile--compact tooltip" data-tooltip="Min is the safety floor, Start is the initial concurrency, and Max is the adaptive ceiling.">
                 <span>Min / Start / Max</span>
                 <div className="inline-numeric-controls">
@@ -600,6 +622,11 @@ function App() {
               <button className="button" type="button" onClick={handleScanSelected} disabled={!activeAccount || isRunning || selectedFactoryCount === 0}>
                 {isRunning ? 'Scanning...' : 'Scan selected factories'}
               </button>
+              {scanLogRunId && (
+                <a className="button button--secondary" href={getScanLogUrl(scanLogRunId)} download>
+                  Download trace log
+                </a>
+              )}
             </div>
           </div>
           <div className="table-wrap">

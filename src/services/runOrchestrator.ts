@@ -15,6 +15,10 @@ const INVENTORY_SUBSCRIPTION_TIMEOUT_MS = Number(import.meta.env.VITE_INVENTORY_
 // capping total scan duration (large multi-day scans can legitimately run for minutes).
 const SCAN_NO_PROGRESS_TIMEOUT_MS = Number(import.meta.env.VITE_SCAN_NO_PROGRESS_TIMEOUT_MS ?? 120000);
 
+export function getScanLogUrl(backendRunId: string): string {
+  return `${backendApiBaseUrl.replace(/\/$/, '')}/api/runs/${encodeURIComponent(backendRunId)}/log`;
+}
+
 interface BackendRunStatus {
   runId: string;
   status: 'queued' | 'running' | 'completed' | 'failed';
@@ -336,6 +340,8 @@ export async function scanSelectedFactories(
   selectedFactoryIds: string[],
   windowDays: number,
   adaptiveSettings?: AdaptiveScanSettings,
+  traceLogEnabled = true,
+  onTraceLogCreated?: (backendRunId: string) => void,
 ): Promise<RunRecord> {
   if (selectedFactoryIds.length === 0) {
     throw new Error('Select at least one factory before starting the usage scan.');
@@ -386,10 +392,11 @@ export async function scanSelectedFactories(
   try {
     const accessToken = isBackendAuth ? undefined : await acquireArmToken(msalInstance);
 
-    const createResponse = await backendJson<{ runId: string; status: string }>('/api/runs', {
+    const createResponse = await backendJson<{ runId: string; status: string; logUrl?: string }>('/api/runs', {
       method: 'POST',
       body: JSON.stringify({
         windowDays,
+        traceLogEnabled,
         adaptive: adaptiveSettings ?? {
           enabled: true,
           min: 1,
@@ -409,6 +416,9 @@ export async function scanSelectedFactories(
     });
 
     const backendRunId = createResponse.runId;
+    if (createResponse.logUrl) {
+      onTraceLogCreated?.(backendRunId);
+    }
     const perSubscriptionTargets = new Map<string, number>();
     for (const factory of selectedFactories) {
       perSubscriptionTargets.set(factory.subscriptionId, (perSubscriptionTargets.get(factory.subscriptionId) ?? 0) + 1);

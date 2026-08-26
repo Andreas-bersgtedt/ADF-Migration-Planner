@@ -122,7 +122,10 @@ SCAN_ADAPTIVE_CONCURRENCY_MAX=8
 SCAN_ADAPTIVE_CONCURRENCY_STABLE_WINDOW=3
 SCAN_MAX_RETAINED_RUNS=50
 SCAN_DATABASE_PATH=server/data/adf-migration-planner.sqlite
+SCAN_LOG_DIRECTORY=server/logs
 ```
+
+`SCAN_LOG_DIRECTORY` sets the trace-file directory. The default is `server/logs`.
 
 ### Adaptive scan settings
 
@@ -227,10 +230,12 @@ Then open the shown local URL (default `http://localhost:5173`).
 2. Click **Start inventory run** to discover subscriptions and inventory factories.
 3. In **Factory inventory**, filter/search and select the factories to scan.
 4. Pick a **Scan profile** (1, 3, 5, or 7 days).
-5. Click **Scan selected factories**.
-6. Review the **Usage summary** table. Results are retained across scans until you click **Clear results**.
-7. Optional: enable **Debug mode** in Execution status to show the **Debug trace** panel for step-by-step diagnostics.
-8. Optional: click **Export to Excel** to download the current results.
+5. Leave **Trace log** enabled to create a separate diagnostic file for this scan, or disable it when no trace is needed.
+6. Click **Scan selected factories**.
+7. Use **Download trace log** beside the scan button to retrieve the file during or after the scan.
+8. Review the **Usage summary** table. Results are retained across scans until you click **Clear results**.
+9. Optional: enable **Debug mode** in Execution status to show the **Debug trace** panel for step-by-step diagnostics.
+10. Optional: click **Export to Excel** to download the current results.
 
 ---
 
@@ -241,6 +246,7 @@ If a scan returns no data or a subscription fails, confirm access before debuggi
 1. Confirm the user has `Reader` (or the granular actions above) on the target subscription.
 2. Confirm the app registration has `user_impersonation` on Azure Service Management with admin consent.
 3. Enable **Debug mode** and read the newest **Debug trace** entries to see which phase failed (`discover-subscriptions` or `inventory-factories:<subscriptionId>`).
+4. For a usage-scan failure, download the scan trace and search for `arm-request-failed`, `arm-request-error`, or `scan-failed`.
 
 ---
 

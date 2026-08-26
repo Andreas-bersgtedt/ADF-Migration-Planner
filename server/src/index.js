@@ -1,6 +1,7 @@
 import { createServer } from 'node:http';
 import { URL } from 'node:url';
 import { getBackendIdentity, inventoryAzureFactories, listAzureSubscriptions, scanFactories } from './azureScanner.js';
+import { createScanLogger, getScanLogFileName, readScanLog } from './scanLogger.js';
 import {
   createRun,
   getRun,
@@ -55,6 +56,11 @@ function normalizeCreateRunRequest(body) {
   const windowDaysRaw = body.windowDays;
   const accessTokenRaw = body.accessToken;
   const adaptiveRaw = body.adaptive;
+
+  if (body.traceLogEnabled !== undefined && typeof body.traceLogEnabled !== 'boolean') {
+    throw new Error('traceLogEnabled must be a boolean when provided.');
+  }
+  const traceLogEnabled = body.traceLogEnabled ?? true;
 
   if (!Array.isArray(factoriesRaw) || factoriesRaw.length === 0) {
     throw new Error('factories must be a non-empty array.');
@@ -113,7 +119,7 @@ function normalizeCreateRunRequest(body) {
     };
   }
 
-  return { factories, windowDays, accessToken, adaptive };
+  return { factories, windowDays, accessToken, adaptive, traceLogEnabled };
 }
 
 function getRunIdFromPath(pathname, suffix) {
@@ -217,6 +223,19 @@ const server = createServer(async (req, res) => {
       const body = await readJsonBody(req);
       const payload = normalizeCreateRunRequest(body);
       const run = createRun(payload.windowDays, payload.factories.length);
+      const logger = payload.traceLogEnabled ? await createScanLogger(run.runId) : undefined;
+      await logger?.info('scan-batch-created', {
+        windowDays: payload.windowDays,
+        factoryCount: payload.factories.length,
+        adaptive: payload.adaptive,
+        factories: payload.factories.map((factory) => ({
+          id: factory.id,
+          name: factory.name,
+          subscriptionId: factory.subscriptionId,
+          resourceGroup: factory.resourceGroup,
+          location: factory.location,
+        })),
+      });
       registerFactories(run.runId, payload.factories);
       logRunAction(run.runId, `Queued usage scan for ${payload.factories.length} factories over ${payload.windowDays} days.`);
 
@@ -228,6 +247,7 @@ const server = createServer(async (req, res) => {
           message: `Scanning ${payload.factories.length} factories over ${payload.windowDays} days.`,
         }));
         logRunAction(run.runId, 'Run started.');
+        await logger?.info('scan-started');
 
         try {
           const results = await scanFactories(
@@ -264,6 +284,7 @@ const server = createServer(async (req, res) => {
             logRunAction(run.runId, `Progress: factories ${completedFactoryCount}/${run.factoryCount}.`);
             },
             payload.adaptive,
+            logger,
           );
 
           results.forEach((result) => upsertUsage(run.runId, result));
@@ -292,8 +313,17 @@ const server = createServer(async (req, res) => {
           } else {
             logRunAction(run.runId, `Run completed successfully (${finalizedRun?.completedFactoryCount ?? 0}/${finalizedRun?.factoryCount ?? 0}).`);
           }
+          await logger?.info('scan-completed', {
+            status: finalizedRun?.status,
+            completedFactoryCount: finalizedRun?.completedFactoryCount,
+            failedFactoryCount: finalizedRun?.failedFactoryCount,
+          });
         } catch (error) {
           const errorMessage = error instanceof Error ? error.message : 'Unexpected scan error.';
+          await logger?.error('scan-failed', {
+            errorMessage,
+            stack: error instanceof Error ? error.stack : undefined,
+          });
           recordScanError(run.runId, null, null, 'run', errorMessage);
           updateRun(run.runId, (current) => ({
             ...current,
@@ -303,10 +333,16 @@ const server = createServer(async (req, res) => {
             lastError: errorMessage,
           }));
           logRunAction(run.runId, `Run failed: ${errorMessage}`);
+        } finally {
+          await logger?.flush();
         }
       })();
 
-      sendJson(res, 202, { runId: run.runId, status: run.status });
+      sendJson(res, 202, {
+        runId: run.runId,
+        status: run.status,
+        logUrl: payload.traceLogEnabled ? `/api/runs/${run.runId}/log` : undefined,
+      });
       return;
     } catch (error) {
       sendJson(res, 400, { error: error instanceof Error ? error.message : 'Invalid request.' });
@@ -345,6 +381,30 @@ const server = createServer(async (req, res) => {
     }
 
     sendJson(res, 200, { run, usage: getUsage(runId) });
+    return;
+  }
+
+  if (req.method === 'GET' && pathname.startsWith('/api/runs/') && pathname.endsWith('/log')) {
+    const runId = getRunIdFromPath(pathname, '/log');
+    if (!runId || !getRun(runId)) {
+      sendJson(res, 404, { error: 'Run not found.' });
+      return;
+    }
+
+    try {
+      const body = await readScanLog(runId);
+      res.writeHead(200, {
+        'Content-Type': 'application/x-ndjson; charset=utf-8',
+        'Content-Disposition': `attachment; filename="${getScanLogFileName(runId)}"`,
+        'Access-Control-Allow-Origin': allowedOrigin,
+      });
+      res.end(body);
+    } catch (error) {
+      const errorCode = error && typeof error === 'object' ? error.code : undefined;
+      sendJson(res, errorCode === 'ENOENT' ? 404 : 500, {
+        error: errorCode === 'ENOENT' ? 'Scan log not found.' : 'Scan log could not be read.',
+      });
+    }
     return;
   }
 
