@@ -3,6 +3,7 @@ import { useMsal } from '@azure/msal-react';
 import { getBackendIdentity, type BackendIdentity } from './api/azureManagement';
 import { isBackendAuth, isClientSecretAuth, isMsalConfigured, loginRequest, msalConfigurationError } from './auth/msalConfig';
 import { StatusCard } from './components/StatusCard';
+import { ScanLogViewer } from './components/ScanLogViewer';
 import { db } from './data/db';
 import { usePlannerData } from './hooks/usePlannerData';
 import { getScanLogUrl, scanSelectedFactories, startInventoryRun } from './services/runOrchestrator';
@@ -184,6 +185,7 @@ function App() {
     }
 
     setIsRunning(true);
+    setScanLogRunId(null);
     setMessage('Inventory discovery started. Subscriptions and factories will be loaded, then you can select factories for usage scanning.');
 
     try {
@@ -422,6 +424,8 @@ function App() {
             </div>
           </section>
         ) : null}
+
+        <ScanLogViewer backendRunId={scanLogRunId} scanRunning={isRunning} />
 
         <section className="panel">
           <div className="panel__header">

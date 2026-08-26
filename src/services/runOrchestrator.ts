@@ -19,6 +19,16 @@ export function getScanLogUrl(backendRunId: string): string {
   return `${backendApiBaseUrl.replace(/\/$/, '')}/api/runs/${encodeURIComponent(backendRunId)}/log`;
 }
 
+export async function fetchScanLog(backendRunId: string): Promise<string> {
+  const response = await fetch(getScanLogUrl(backendRunId));
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(`Trace log request failed (${response.status}): ${body}`);
+  }
+
+  return response.text();
+}
+
 interface BackendRunStatus {
   runId: string;
   status: 'queued' | 'running' | 'completed' | 'failed';

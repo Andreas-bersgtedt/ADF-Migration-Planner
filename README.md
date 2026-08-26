@@ -283,6 +283,8 @@ Authorization headers, access tokens, client secrets, and fields whose names con
 
 After the backend accepts a trace-enabled scan, the UI shows **Download trace log** beside the scan button. The file can also be downloaded from `GET /api/runs/<backend-run-id>/log`, including while the scan is running.
 
+The **Scan trace viewer** in the UI can load the current backend trace or open a previously downloaded `.jsonl` or `.ndjson` file. Use **Level** and **Event** for exact filters, or **Search trace** to match any value in an entry, including factory names, URLs, statuses, and error text. Select an entry to inspect its formatted JSON. **Refresh live trace** reads the file again while a scan is still running. Malformed lines are skipped and counted so valid entries remain available. Filters search the full file; the viewer renders the newest 500 matches to keep large traces responsive.
+
 ### Adaptive scanning
 
 An ADF activity-run query is issued once for each pipeline execution. A factory with 1,000 pipeline executions therefore needs about 1,000 activity-run queries, plus any continuation-page requests. Adaptive scanning controls how many pipeline executions can have an activity-run traversal in progress at the same time.

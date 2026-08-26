@@ -233,9 +233,10 @@ Then open the shown local URL (default `http://localhost:5173`).
 5. Leave **Trace log** enabled to create a separate diagnostic file for this scan, or disable it when no trace is needed.
 6. Click **Scan selected factories**.
 7. Use **Download trace log** beside the scan button to retrieve the file during or after the scan.
-8. Review the **Usage summary** table. Results are retained across scans until you click **Clear results**.
-9. Optional: enable **Debug mode** in Execution status to show the **Debug trace** panel for step-by-step diagnostics.
-10. Optional: click **Export to Excel** to download the current results.
+8. In **Scan trace viewer**, load the current trace or open a downloaded trace file. Filter by level, event, or text, then select a row to inspect its JSON.
+9. Review the **Usage summary** table. Results are retained across scans until you click **Clear results**.
+10. Optional: enable **Debug mode** in Execution status to show the **Debug trace** panel for step-by-step diagnostics.
+11. Optional: click **Export to Excel** to download the current results.
 
 ---
 

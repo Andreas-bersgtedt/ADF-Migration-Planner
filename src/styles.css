@@ -133,6 +133,24 @@ select {
   background: linear-gradient(135deg, #efb366, #c16d2b);
 }
 
+.button--quiet {
+  border: 1px solid rgba(20, 33, 61, 0.16);
+  background: #fff;
+  color: #345;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 .content-grid {
   display: grid;
   gap: 20px;
@@ -287,6 +305,123 @@ select {
   color: #7a8794;
 }
 
+.log-viewer__actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.log-viewer__actions .button {
+  padding: 0.58rem 0.9rem;
+  text-decoration: none;
+  font-size: 0.88rem;
+}
+
+.log-viewer__filters {
+  display: grid;
+  grid-template-columns: minmax(120px, 0.5fr) minmax(190px, 0.8fr) minmax(260px, 1.7fr) auto;
+  align-items: end;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.log-viewer__filters label {
+  display: grid;
+  gap: 4px;
+  color: #4b5f6f;
+  font-size: 0.82rem;
+}
+
+.log-viewer__filters select,
+.log-viewer__filters input {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid rgba(20, 33, 61, 0.16);
+  border-radius: 8px;
+  background: #fff;
+  padding: 8px 10px;
+  color: #233;
+}
+
+.log-viewer__filters .button {
+  padding: 0.55rem 0.9rem;
+}
+
+.log-viewer__error,
+.log-viewer__warning,
+.log-viewer__notice {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border-left: 4px solid #ad2e24;
+  background: #fff0ef;
+  color: #7f211a;
+}
+
+.log-viewer__warning {
+  border-left-color: #c16d2b;
+  background: #fff7e8;
+  color: #7a3f11;
+}
+
+.log-viewer__notice {
+  border-left-color: #31586d;
+  background: #edf6fa;
+  color: #31586d;
+}
+
+.log-viewer__entries {
+  max-height: 620px;
+  overflow: auto;
+  border-block: 1px solid rgba(20, 33, 61, 0.1);
+}
+
+.log-entry {
+  border-bottom: 1px solid rgba(20, 33, 61, 0.08);
+  border-left: 4px solid #64829b;
+  background: rgba(255, 255, 255, 0.58);
+}
+
+.log-entry--warn {
+  border-left-color: #c16d2b;
+}
+
+.log-entry--error {
+  border-left-color: #ad2e24;
+}
+
+.log-entry summary {
+  display: grid;
+  grid-template-columns: minmax(170px, auto) 74px minmax(190px, 1fr) minmax(120px, 1fr);
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  cursor: pointer;
+}
+
+.log-entry summary::marker {
+  color: #567;
+}
+
+.log-entry time,
+.log-entry__context {
+  color: #607383;
+  font-size: 0.82rem;
+  overflow-wrap: anywhere;
+}
+
+.log-entry pre {
+  margin: 0;
+  padding: 14px 18px;
+  overflow: auto;
+  border-top: 1px solid rgba(20, 33, 61, 0.08);
+  background: #18242d;
+  color: #e8f0ed;
+  font: 0.8rem/1.5 Consolas, "Courier New", monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .pill {
   padding: 0.45rem 0.8rem;
   border-radius: 999px;
@@ -294,6 +429,21 @@ select {
   text-transform: capitalize;
   background: #d7efe9;
   color: #155b53;
+}
+
+.pill--log-info {
+  background: #dceaf2;
+  color: #31586d;
+}
+
+.pill--log-warn {
+  background: #fff2d7;
+  color: #8a5a12;
+}
+
+.pill--log-error {
+  background: #fde4e4;
+  color: #8a2323;
 }
 
 .pill--failed {
@@ -488,5 +638,41 @@ th {
 
   .filter-toolbar {
     grid-template-columns: 1fr;
+  }
+
+  .log-viewer__actions {
+    justify-content: flex-start;
+  }
+
+  .log-viewer__filters {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .log-viewer__search {
+    grid-column: 1 / -1;
+  }
+
+  .log-entry summary {
+    grid-template-columns: 1fr auto;
+  }
+
+  .log-entry summary strong,
+  .log-entry__context {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 560px) {
+  .log-viewer__filters {
+    grid-template-columns: 1fr;
+  }
+
+  .log-viewer__search {
+    grid-column: auto;
+  }
+
+  .log-viewer__actions .button {
+    flex: 1 1 100%;
+    text-align: center;
   }
 }
