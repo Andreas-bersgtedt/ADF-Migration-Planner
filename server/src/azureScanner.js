@@ -14,7 +14,11 @@ const execFileAsync = promisify(execFile);
 const ARM_ENDPOINT = 'https://management.azure.com';
 const ACTIVITY_RUN_QUERY_CONCURRENCY = Number(process.env.SCAN_ACTIVITY_QUERY_CONCURRENCY ?? 2);
 const DAY_WINDOW_CONCURRENCY = Number(process.env.SCAN_DAY_WINDOW_CONCURRENCY ?? 3);
-const FACTORY_SCAN_CONCURRENCY = Number(process.env.SCAN_FACTORY_CONCURRENCY ?? 2);
+const MAX_FACTORY_SCAN_CONCURRENCY = 10;
+const DEFAULT_FACTORY_SCAN_CONCURRENCY = Math.min(
+  MAX_FACTORY_SCAN_CONCURRENCY,
+  Math.max(1, Math.trunc(Number(process.env.SCAN_FACTORY_CONCURRENCY ?? 2) || 2)),
+);
 const DEFAULT_ADAPTIVE_CONCURRENCY = {
   enabled: true,
   min: Number(process.env.SCAN_ADAPTIVE_CONCURRENCY_MIN ?? 1),
@@ -210,7 +214,7 @@ const adaptiveConcurrencyController = createAdaptiveConcurrencyController(
   DEFAULT_ADAPTIVE_CONCURRENCY.stableWindow,
 );
 
-function createRunAdaptiveConcurrencyController(settings, logger) {
+function createRunAdaptiveConcurrencyController(settings, logger, factory) {
   const normalized = clampAdaptiveSettings(settings ?? DEFAULT_ADAPTIVE_CONCURRENCY);
   return createAdaptiveConcurrencyController(
     normalized.start,
@@ -220,7 +224,14 @@ function createRunAdaptiveConcurrencyController(settings, logger) {
     {
       enabled: normalized.enabled,
       onLimitChanged: (reason, previousLimit, currentLimit, cooldownMs) => {
-        void logger?.info('adaptive-concurrency-changed', { reason, previousLimit, currentLimit, cooldownMs });
+        void logger?.info('adaptive-concurrency-changed', {
+          factoryId: factory?.id,
+          factoryName: factory?.name,
+          reason,
+          previousLimit,
+          currentLimit,
+          cooldownMs,
+        });
       },
     },
   );
@@ -1247,20 +1258,34 @@ async function scanFactory(
   return usageRecord;
 }
 
-export async function scanFactories(runId, factories, windowDays, accessTokenOverride, onProgress, adaptiveSettings = DEFAULT_ADAPTIVE_CONCURRENCY, logger) {
+export async function scanFactories(
+  runId,
+  factories,
+  windowDays,
+  accessTokenOverride,
+  onProgress,
+  adaptiveSettings = DEFAULT_ADAPTIVE_CONCURRENCY,
+  factoryConcurrency = DEFAULT_FACTORY_SCAN_CONCURRENCY,
+  logger,
+) {
   const normalizedAdaptiveSettings = clampAdaptiveSettings(adaptiveSettings);
-  const adaptiveController = createRunAdaptiveConcurrencyController(normalizedAdaptiveSettings, logger);
-  const activityQueryGate = createActivityQueryGate(adaptiveController, ACTIVITY_RUN_QUERY_CONCURRENCY);
-  const adaptiveFactoryConcurrency = resolveAdaptiveConcurrency(FACTORY_SCAN_CONCURRENCY, adaptiveController);
+  const effectiveFactoryScanConcurrency = clamp(
+    Math.trunc(Number(factoryConcurrency) || DEFAULT_FACTORY_SCAN_CONCURRENCY),
+    1,
+    MAX_FACTORY_SCAN_CONCURRENCY,
+  );
   await logger?.info('scan-runtime-settings', {
     authMode: accessTokenOverride ? 'forwarded-access-token' : BACKEND_AUTH_MODE,
     factoryCount: factories.length,
     windowDays,
-    factoryScanConcurrency: FACTORY_SCAN_CONCURRENCY,
-    effectiveFactoryScanConcurrency: adaptiveFactoryConcurrency,
+    factoryScanConcurrency: effectiveFactoryScanConcurrency,
+    effectiveFactoryScanConcurrency,
     dayWindowConcurrency: DAY_WINDOW_CONCURRENCY,
-    effectiveDayWindowConcurrency: resolveAdaptiveConcurrency(DAY_WINDOW_CONCURRENCY, adaptiveController),
+    effectiveDayWindowConcurrency: normalizedAdaptiveSettings.enabled
+      ? Math.min(DAY_WINDOW_CONCURRENCY, normalizedAdaptiveSettings.start)
+      : DAY_WINDOW_CONCURRENCY,
     activityRunQueryConcurrency: ACTIVITY_RUN_QUERY_CONCURRENCY,
+    adaptiveControllerScope: 'factory',
     adaptive: normalizedAdaptiveSettings,
     armFetchTimeoutMs: ARM_FETCH_TIMEOUT_MS,
     armFetchMaxRetries: ARM_FETCH_MAX_RETRIES,
@@ -1268,7 +1293,9 @@ export async function scanFactories(runId, factories, windowDays, accessTokenOve
     platform: process.platform,
     processId: process.pid,
   });
-  return mapWithConcurrency(factories, adaptiveFactoryConcurrency, async (factory) =>
-    scanFactory(runId, factory, windowDays, accessTokenOverride, onProgress, adaptiveController, activityQueryGate, logger),
-  );
+  return mapWithConcurrency(factories, effectiveFactoryScanConcurrency, async (factory) => {
+    const adaptiveController = createRunAdaptiveConcurrencyController(normalizedAdaptiveSettings, logger, factory);
+    const activityQueryGate = createActivityQueryGate(adaptiveController, ACTIVITY_RUN_QUERY_CONCURRENCY);
+    return scanFactory(runId, factory, windowDays, accessTokenOverride, onProgress, adaptiveController, activityQueryGate, logger);
+  });
 }

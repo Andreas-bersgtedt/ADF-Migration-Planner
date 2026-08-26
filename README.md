@@ -291,21 +291,22 @@ The **Scan trace viewer** in the UI can load the current backend trace or open a
 
 An ADF activity-run query is issued once for each pipeline execution. A factory with 1,000 pipeline executions therefore needs about 1,000 activity-run queries, plus any continuation-page requests. Adaptive scanning controls how many pipeline executions can have an activity-run traversal in progress at the same time.
 
-The activity-query limit is global to one scan run. Factories and day chunks do not receive separate allowances. For example, an effective limit of `6` permits at most six activity-run traversals across all factories and day chunks in that run. A traversal keeps its slot while it follows continuation tokens or retries a transient request.
+Each factory receives an independent adaptive controller and activity-query gate. For example, an effective limit of `4` permits up to four activity-run traversals for each active factory. A traversal keeps its factory's slot while it follows continuation tokens or retries a transient request. A throttle from one factory reduces only that factory's limit and cooldown.
 
 #### Settings
 
 | Setting | Default | Behavior |
 | --- | ---: | --- |
-| `SCAN_ACTIVITY_QUERY_CONCURRENCY` | `2` | Fixed global activity-query limit when adaptive scanning is disabled. |
+| `SCAN_ACTIVITY_QUERY_CONCURRENCY` | `2` | Fixed activity-query limit per factory when adaptive scanning is disabled. |
+| `SCAN_FACTORY_CONCURRENCY` | `2` | Backend default for factories processed concurrently; capped at `10`. |
 | `SCAN_ADAPTIVE_CONCURRENCY_MIN` | `1` | Lowest configured adaptive limit. |
 | `SCAN_ADAPTIVE_CONCURRENCY_START` | `3` | Effective activity-query limit at the start of a run. |
 | `SCAN_ADAPTIVE_CONCURRENCY_MAX` | `8` | Highest adaptive limit. |
 | `SCAN_ADAPTIVE_CONCURRENCY_STABLE_WINDOW` | `3` | Successful ARM responses required to raise the limit by one. |
 
-The scan form sends its **Min / Start / Max** and **Stable window** values with each run. Those values override the backend `SCAN_ADAPTIVE_*` defaults for that run. Direct API callers can send the same values in the `adaptive` object. If the request omits `adaptive`, the backend environment defaults apply.
+The scan form sends its **Factory concurrency**, **Min / Start / Max**, and **Stable window** values with each run. Factory concurrency accepts `1–10` and overrides `SCAN_FACTORY_CONCURRENCY`. The adaptive values override the backend `SCAN_ADAPTIVE_*` defaults for every factory in that run. Direct API callers can send `factoryConcurrency` and the `adaptive` object. Omitted values use backend defaults.
 
-Disabling **Adaptive scan** makes `SCAN_ACTIVITY_QUERY_CONCURRENCY` the fixed global limit. The UI does not currently expose that fixed value, so set it in the backend process environment before starting the API.
+Disabling **Adaptive scan** makes `SCAN_ACTIVITY_QUERY_CONCURRENCY` the fixed per-factory limit. The UI does not currently expose that fixed value, so set it in the backend process environment before starting the API.
 
 #### ADF monitoring-query limit
 
@@ -332,14 +333,14 @@ The backend maintains an effective runtime limit; it does not change the process
 ```mermaid
 flowchart TD
    Start["Start scan run"] --> Mode{"Adaptive scan enabled?"}
-   Mode -->|No| Fixed["Set global activity limit from<br/>SCAN_ACTIVITY_QUERY_CONCURRENCY"]
-   Mode -->|Yes| Initial["Set runtime limit to Start<br/>bounded by Min and Max"]
+   Mode -->|No| Fixed["For each factory, set fixed activity limit from<br/>SCAN_ACTIVITY_QUERY_CONCURRENCY"]
+   Mode -->|Yes| Initial["For each factory, set runtime limit to Start<br/>bounded by Min and Max"]
 
    Initial --> Discover["Fetch pipeline-run pages"]
    Fixed --> Discover
    Discover --> Queue["Queue one activity traversal<br/>per pipeline execution"]
    Queue --> Capacity{"Active traversals below<br/>effective limit?"}
-   Capacity -->|No| Wait["Wait in global queue"]
+   Capacity -->|No| Wait["Wait in factory queue"]
    Wait --> Capacity
    Capacity -->|Yes| Traverse["Acquire slot and traverse<br/>activity-run pages sequentially"]
    Traverse --> Outcome{"Traversal outcome"}
@@ -380,10 +381,12 @@ Adaptive scanning directly gates activity-run traversal. Two separate settings c
 
 | Setting | Default | Scope |
 | --- | ---: | --- |
-| `SCAN_FACTORY_CONCURRENCY` | `2` | Factories processed concurrently. |
+| `SCAN_FACTORY_CONCURRENCY` | `2` | Backend default for factories processed concurrently. The UI can override it from `1–10` per run. |
 | `SCAN_DAY_WINDOW_CONCURRENCY` | `3` | Day chunks processed concurrently within each factory. |
 
-Pipeline-run page requests are not admitted through the activity-query gate. They share the adaptive controller's success, throttle, and cooldown signals, so they can cause the activity limit to rise or fall. The factory and day worker counts are selected when their worker pools start and are not resized during that run.
+Pipeline-run page requests are not admitted through the activity-query gate. Within a factory, pipeline and activity responses share that factory's adaptive signals, so either operation can cause its limit to rise or fall. Factory and day worker counts are selected when their worker pools start and are not resized during that run.
+
+Increasing **Factory concurrency** lets independently limited factories scan in parallel. It does not increase the 1,000 monitoring-query allowance of any single factory. Keep aggregate ARM traffic, retries, and other subscription clients within the applicable ARM limits when raising it toward `10`.
 
 #### Tuning
 

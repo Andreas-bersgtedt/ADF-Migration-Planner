@@ -36,6 +36,7 @@ function App() {
   const [scanTargetFactoryCount, setScanTargetFactoryCount] = useState(0);
   const [scanTargetSubscriptionIds, setScanTargetSubscriptionIds] = useState<string[]>([]);
   const [scanProfileDays, setScanProfileDays] = useState<number>(7);
+  const [factoryConcurrency, setFactoryConcurrency] = useState(2);
   const [adaptiveScanSettings, setAdaptiveScanSettings] = useState(defaultAdaptiveScanSettings);
   const [traceLogEnabled, setTraceLogEnabled] = useState(true);
   const [traceVerboseEnabled, setTraceVerboseEnabled] = useState(false);
@@ -235,6 +236,7 @@ function App() {
         selectedFactoryIds,
         scanProfileDays,
         adaptiveScanSettings,
+        factoryConcurrency,
         traceLogEnabled,
         traceVerboseEnabled,
         setScanLogRunId,
@@ -560,6 +562,19 @@ function App() {
                   disabled={isRunning}
                   aria-label="Enable adaptive scan tuning"
                   title="Let the backend tune concurrency automatically using successful requests and Azure throttling signals."
+                />
+              </label>
+              <label className="selection-toolbar__profile selection-toolbar__profile--compact tooltip" data-tooltip="Factories scanned at the same time. Each factory has an independent adaptive controller. Maximum 10.">
+                <span>Factory concurrency</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={10}
+                  value={factoryConcurrency}
+                  onChange={(event) => setFactoryConcurrency(Math.min(10, Math.max(1, Number(event.target.value) || 1)))}
+                  disabled={isRunning}
+                  aria-label="Factory scan concurrency"
+                  title="Number of factories scanned concurrently, from 1 to 10."
                 />
               </label>
               <label className="selection-toolbar__profile tooltip" data-tooltip="Write a detailed, unique trace file for this scan batch, including runtime settings, requests, retries, and failures.">

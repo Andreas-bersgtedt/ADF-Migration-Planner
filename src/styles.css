@@ -663,6 +663,17 @@ th {
 }
 
 @media (max-width: 560px) {
+  .selection-toolbar__profile.tooltip::after {
+    left: 0;
+    max-width: calc(100vw - 32px);
+    transform: translate(0, 4px);
+  }
+
+  .selection-toolbar__profile.tooltip:hover::after,
+  .selection-toolbar__profile.tooltip:focus-within::after {
+    transform: translate(0, 0);
+  }
+
   .log-viewer__filters {
     grid-template-columns: 1fr;
   }

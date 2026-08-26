@@ -129,18 +129,20 @@ SCAN_LOG_DIRECTORY=server/logs
 
 ### Adaptive scan settings
 
-Activity-run queries share one limit across every selected factory and day chunk. The scan form's **Min / Start / Max** and **Stable window** values override the `SCAN_ADAPTIVE_*` backend defaults for that run.
+Each selected factory has an independent adaptive controller and activity-query gate. The scan form's **Min / Start / Max** and **Stable window** values configure every factory controller for that run. A throttle from one factory does not reduce another factory's limit.
+
+**Factory concurrency** controls how many factories are scanned simultaneously. It defaults to `2`, accepts `1–10`, and overrides `SCAN_FACTORY_CONCURRENCY` for that run. Raising it increases aggregate ARM traffic but does not change any factory's 1,000 monitoring-query-per-minute allowance.
 
 1. **Start** is the initial number of concurrent activity-run traversals.
 2. **Stable window** is the number of successful ARM responses required to increase the limit by one.
 3. **Max** is the ceiling reached through successful responses.
 4. **Min** is the floor used after throttling or low rate-limit headroom.
 
-Azure `408`, `429`, and `5xx` responses reduce the limit and trigger retry backoff. Requests already running are allowed to finish; queued activity queries wait for capacity under the new limit. Pipeline and activity responses both contribute to adaptation, although the global gate applies only to activity-run traversals.
+Azure `408`, `429`, and `5xx` responses reduce the affected factory's limit and trigger retry backoff. Requests already running are allowed to finish; that factory's queued activity queries wait for capacity under the new limit. Pipeline and activity responses both contribute to the factory's adaptation, although its gate applies only to activity-run traversals.
 
 Start with `1 / 3 / 8` and a stable window of `3`. For a shared or frequently throttled subscription, try `1 / 2 / 4` with a stable window of `10`. Increase the maximum only after completed scan notes show stable throughput without throttle failures.
 
-When adaptive scanning is disabled, `SCAN_ACTIVITY_QUERY_CONCURRENCY` becomes the fixed global activity-query limit. Environment values are read when the backend starts; restart the API after changing them. See [Adaptive scanning](../README.md#adaptive-scanning) for precedence, exact scale-down rules, and tuning guidance.
+When adaptive scanning is disabled, `SCAN_ACTIVITY_QUERY_CONCURRENCY` becomes the fixed per-factory activity-query limit. Environment values are read when the backend starts; restart the API after changing them. See [Adaptive scanning](../README.md#adaptive-scanning) for precedence, exact scale-down rules, and tuning guidance.
 
 Azure Data Factory allows 1,000 monitoring queries per minute. A `429` with code `TooManyPipelineRunQueryRequests` means the factory named in the response reached that fixed service limit. The scanner reduces concurrency and retries automatically. Start with **Min / Start / Max** set to `1 / 2 / 6` and **Stable window** set to `10`; lower **Max** to `4` if the trace shows frequent occurrences. See [ADF monitoring-query limit](../README.md#adf-monitoring-query-limit) for scope and troubleshooting details.
 

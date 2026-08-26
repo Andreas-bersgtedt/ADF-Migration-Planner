@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - In-app scan trace viewer with local file loading, live refresh, level/event/text filters, and expandable JSON entries.
 - Default-off verbose trace mode for successful ARM request start/completion events, keeping standard scan logs compact.
 - Documentation for ADF's fixed 1,000 monitoring-queries-per-minute limit, `TooManyPipelineRunQueryRequests`, and adaptive tuning guidance.
+- Per-factory adaptive concurrency controllers and a run-scoped Factory concurrency UI setting capped at 10.
 
 ## [1.0.0] - 2026-07-29
 

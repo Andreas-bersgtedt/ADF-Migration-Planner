@@ -350,6 +350,7 @@ export async function scanSelectedFactories(
   selectedFactoryIds: string[],
   windowDays: number,
   adaptiveSettings?: AdaptiveScanSettings,
+  factoryConcurrency = 2,
   traceLogEnabled = true,
   traceVerboseEnabled = false,
   onTraceLogCreated?: (backendRunId: string) => void,
@@ -409,6 +410,7 @@ export async function scanSelectedFactories(
         windowDays,
         traceLogEnabled,
         traceVerboseEnabled,
+        factoryConcurrency,
         adaptive: adaptiveSettings ?? {
           enabled: true,
           min: 1,

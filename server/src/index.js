@@ -56,6 +56,7 @@ function normalizeCreateRunRequest(body) {
   const windowDaysRaw = body.windowDays;
   const accessTokenRaw = body.accessToken;
   const adaptiveRaw = body.adaptive;
+  const factoryConcurrencyRaw = body.factoryConcurrency;
 
   if (body.traceLogEnabled !== undefined && typeof body.traceLogEnabled !== 'boolean') {
     throw new Error('traceLogEnabled must be a boolean when provided.');
@@ -86,6 +87,14 @@ function normalizeCreateRunRequest(body) {
   }
 
   const accessToken = typeof accessTokenRaw === 'string' && accessTokenRaw.trim().length > 0 ? accessTokenRaw.trim() : undefined;
+
+  let factoryConcurrency;
+  if (factoryConcurrencyRaw !== undefined) {
+    factoryConcurrency = Number(factoryConcurrencyRaw);
+    if (!Number.isFinite(factoryConcurrency) || Math.trunc(factoryConcurrency) !== factoryConcurrency || factoryConcurrency < 1 || factoryConcurrency > 10) {
+      throw new Error('factoryConcurrency must be a whole number between 1 and 10.');
+    }
+  }
 
   let adaptive = undefined;
   if (adaptiveRaw !== undefined) {
@@ -124,7 +133,7 @@ function normalizeCreateRunRequest(body) {
     };
   }
 
-  return { factories, windowDays, accessToken, adaptive, traceLogEnabled, traceVerboseEnabled };
+  return { factories, windowDays, accessToken, adaptive, factoryConcurrency, traceLogEnabled, traceVerboseEnabled };
 }
 
 function getRunIdFromPath(pathname, suffix) {
@@ -234,6 +243,7 @@ const server = createServer(async (req, res) => {
       await logger?.info('scan-batch-created', {
         windowDays: payload.windowDays,
         factoryCount: payload.factories.length,
+        factoryConcurrency: payload.factoryConcurrency,
         traceVerboseEnabled: payload.traceVerboseEnabled,
         adaptive: payload.adaptive,
         factories: payload.factories.map((factory) => ({
@@ -292,6 +302,7 @@ const server = createServer(async (req, res) => {
             logRunAction(run.runId, `Progress: factories ${completedFactoryCount}/${run.factoryCount}.`);
             },
             payload.adaptive,
+            payload.factoryConcurrency,
             logger,
           );
 
