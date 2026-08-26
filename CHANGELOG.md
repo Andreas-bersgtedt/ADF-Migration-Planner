@@ -7,7 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
+## [1.1.0] - 2026-08-26
+
+### Added in 1.1.0
 
 - Per-scan JSON Lines trace logs with runtime settings, concurrency changes, ARM request attempts, retries, failures, and throughput.
 - Factory inventory controls to enable or disable trace creation and download the current batch trace.
@@ -16,12 +18,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Default-off verbose trace mode for successful ARM request start/completion events, keeping standard scan logs compact.
 - Documentation for ADF's fixed 1,000 monitoring-queries-per-minute limit, `TooManyPipelineRunQueryRequests`, and adaptive tuning guidance.
 - Per-factory adaptive concurrency controllers and a run-scoped Factory concurrency UI setting capped at 10.
+- Operating guide, API example, trace verification steps, and tested tuning profiles for per-factory adaptive scans.
 
 ## [1.0.0] - 2026-07-29
 
 First public release.
 
-### Added
+### Added in 1.0.0
 
 - React + Vite + TypeScript SPA with Microsoft Entra interactive sign-in (MSAL redirect flow).
 - Subscription discovery and Azure Data Factory inventory via Azure Resource Graph.

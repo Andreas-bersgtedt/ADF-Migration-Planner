@@ -308,6 +308,48 @@ The scan form sends its **Factory concurrency**, **Min / Start / Max**, and **St
 
 Disabling **Adaptive scan** makes `SCAN_ACTIVITY_QUERY_CONCURRENCY` the fixed per-factory limit. The UI does not currently expose that fixed value, so set it in the backend process environment before starting the API.
 
+#### Scan process
+
+1. Select the factories to scan.
+2. Set **Factory concurrency** to the number of factories that may run at once. The default is `2`; the UI and API reject values outside `1–10`.
+3. Leave **Adaptive scan** enabled and start with **Min / Start / Max** set to `1 / 2 / 4` and **Stable window** set to `15`.
+4. Keep **Trace log** enabled. Enable **Verbose trace** when measuring request rates or comparing tuning profiles.
+5. Start the scan. The backend creates one controller and one activity-query gate when each factory worker starts.
+6. Review `arm-request-failed` and `adaptive-concurrency-changed` events after the run. A factory-specific throttle must change only the controller whose `factoryName` matches the failed request.
+
+Factory concurrency controls breadth; adaptive concurrency controls request pressure inside each factory. With factory concurrency `5` and adaptive Max `4`, as many as five factories can be active, and each factory can admit up to four activity-run traversals. This does not create one global limit of `20`; each controller raises, reduces, and cools down independently.
+
+#### Run API
+
+`POST /api/runs` accepts the same settings as the scan form:
+
+```json
+{
+   "windowDays": 7,
+   "factoryConcurrency": 5,
+   "adaptive": {
+      "enabled": true,
+      "min": 1,
+      "start": 2,
+      "max": 4,
+      "stableWindow": 15
+   },
+   "traceLogEnabled": true,
+   "traceVerboseEnabled": false,
+   "factories": [
+      {
+         "id": "/subscriptions/<subscription>/resourceGroups/<group>/providers/Microsoft.DataFactory/factories/<factory>",
+         "name": "<factory>",
+         "subscriptionId": "<subscription>",
+         "resourceGroup": "<group>",
+         "location": "<region>"
+      }
+   ]
+}
+```
+
+When `factoryConcurrency` is omitted, the backend uses `SCAN_FACTORY_CONCURRENCY`, clamped to `1–10`. The scan trace records the selected value as `factoryConcurrency` in `scan-batch-created` and as `effectiveFactoryScanConcurrency` in `scan-runtime-settings`.
+
 #### ADF monitoring-query limit
 
 Microsoft publishes an Azure Data Factory limit of **1,000 monitoring queries per minute**, with both the default and maximum set to `1,000`. This is an ADF service limit, separate from the Azure Resource Manager read limit of `12,500/hour`. The published table does not label the monitoring-query row's scope. When the service enforces the limit for this scanner, its `429` response identifies the affected factory resource:
@@ -320,9 +362,9 @@ Maximum allowed number of run queries per minute is '1000'.
 
 The scanner issues one pipeline-run query for each factory/day window, followed by an activity-run query for every discovered pipeline execution and any continuation pages. Those monitoring calls share the factory's service allowance. Other monitoring clients querying the same factory, including portal monitoring or automation, can consume the same allowance during a scan.
 
-The scanner treats this response as transient: it records `arm-request-failed`, lowers adaptive concurrency, honors the service retry delay when present, and retries. Recovered `429` responses do not make a day chunk fail. Repeated throttling still increases scan duration and can exhaust retries.
+The scanner treats this response as transient: it records `arm-request-failed`, lowers the affected factory's adaptive concurrency, honors the service retry delay when present, and retries. Recovered `429` responses do not make a day chunk fail. Repeated throttling still increases scan duration and can exhaust retries.
 
-Use `Min / Start / Max = 1 / 2 / 6` and `Stable window = 10` as the initial profile for an active factory. If `TooManyPipelineRunQueryRequests` remains frequent, reduce **Max** to `4`, increase **Stable window** to `15`, scan fewer factories at once, or avoid overlapping the scan with other monitoring tools. Raising **Max** cannot increase the fixed 1,000-query service limit.
+Use `Min / Start / Max = 1 / 2 / 4` and `Stable window = 15` as the initial profile for an active factory. In the three-factory test set, this profile completed in 103.8 seconds with 31 recovered `429` responses, compared with 56 at `1 / 2 / 6 / 10` and 494 at `1 / 3 / 44 / 1`. If `TooManyPipelineRunQueryRequests` remains frequent, reduce **Max** to `2`, increase **Stable window** to `30`, or avoid overlapping the scan with other monitoring tools. Raising **Factory concurrency** can improve throughput across factories, but raising adaptive **Max** cannot increase one factory's fixed 1,000-query service limit.
 
 Official reference: [Azure Data Factory limits](https://learn.microsoft.com/azure/azure-resource-manager/management/azure-subscription-service-limits#azure-data-factory-limits).
 
@@ -394,11 +436,23 @@ Use the defaults first. Change one boundary at a time and compare total calls, c
 
 | Workload | Min | Start | Max | Stable window | Rationale |
 | --- | ---: | ---: | ---: | ---: | --- |
-| Shared subscription or frequent throttling | 1 | 2 | 4 | 10 | Ramps slowly and keeps the peak request count low. |
-| General scan | 1 | 3 | 8 | 3 | Current default behavior. |
+| Tested baseline | 1 | 2 | 4 | 15 | Lowest throttle rate in the three-factory comparison: 31 of 1,396 attempts. |
+| Frequent per-factory throttling | 1 | 1 | 2 | 30 | Reduces request bursts and delays each increase. |
+| General scan | 1 | 3 | 8 | 3 | Backend default; monitor traces before using it on active factories. |
 | High-volume factory with observed rate-limit headroom | 2 | 6 | 12 | 10 | Starts faster but requires ten successful responses for each increase. |
 
 Do not set **Min** higher than the concurrency level Azure has sustained without throttling. A high minimum prevents the controller from reducing pressure far enough after a `429`. Raising **Max** only helps when enough pipeline executions are queued; it does not parallelize continuation pages for one pipeline execution.
+
+#### Trace verification
+
+New traces identify controller ownership directly:
+
+```json
+{"event":"scan-runtime-settings","effectiveFactoryScanConcurrency":5,"adaptiveControllerScope":"factory"}
+{"event":"adaptive-concurrency-changed","factoryName":"factory-a","reason":"throttle","previousLimit":4,"currentLimit":2,"cooldownMs":1200}
+```
+
+Use the trace viewer to filter **Event** to `adaptive-concurrency-changed`, then search by factory name. A `429` for one factory should be followed by a limit reduction for that factory only. Traces created before commit `7b8cddf` do not include `factoryName` on adaptive events and use the former batch-wide controller, so do not use them to validate per-factory isolation.
 
 The backend uses embedded SQLite as the authoritative local scan store. It persists runs, selected factories, factory summaries, daily metrics, pipeline runs, activity runs (including start/end timestamps), scan errors, and day checkpoints. The default database is `server/data/adf-migration-planner.sqlite`; no separate database service is required. Browser IndexedDB remains a UI cache for inventory and summary rendering.
 
@@ -531,7 +585,7 @@ Key calculations:
 6. `TooManyPipelineRunQueryRequests` or HTTP `429`:
    - ADF permits 1,000 monitoring queries per minute; the service response identifies the factory that reached the limit.
    - Filter the scan trace to event `arm-request-failed` and search for `TooManyPipelineRunQueryRequests`.
-   - Start with adaptive settings `1 / 2 / 6`, stable window `10`; lower **Max** to `4` if throttling remains frequent.
+   - Start with adaptive settings `1 / 2 / 4`, stable window `15`; lower **Max** to `2` and increase the stable window to `30` if throttling remains frequent.
    - Avoid running portal or automated monitoring queries against the same factory during the scan.
 
 ## Build

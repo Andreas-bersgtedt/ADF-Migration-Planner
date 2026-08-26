@@ -133,6 +133,19 @@ Each selected factory has an independent adaptive controller and activity-query 
 
 **Factory concurrency** controls how many factories are scanned simultaneously. It defaults to `2`, accepts `1–10`, and overrides `SCAN_FACTORY_CONCURRENCY` for that run. Raising it increases aggregate ARM traffic but does not change any factory's 1,000 monitoring-query-per-minute allowance.
 
+Use this process for the first scan after upgrading:
+
+1. Select the factories and leave **Factory concurrency** at `2`.
+2. Enable **Adaptive scan** and enter `1 / 2 / 4` for **Min / Start / Max**.
+3. Set **Stable window** to `15`.
+4. Keep **Trace log** enabled. Enable **Verbose trace** when request-rate measurements are required.
+5. Start the scan and review the trace after completion.
+6. Filter the trace viewer to `arm-request-failed` to count `429` responses.
+7. Filter to `adaptive-concurrency-changed` and search each throttled factory name. Only that factory should show a throttle reduction.
+8. Increase **Factory concurrency** one step at a time when scans complete without subscription-level ARM pressure. Do not increase adaptive **Max** to compensate for a per-factory `429`.
+
+The per-factory adaptive controls work as follows:
+
 1. **Start** is the initial number of concurrent activity-run traversals.
 2. **Stable window** is the number of successful ARM responses required to increase the limit by one.
 3. **Max** is the ceiling reached through successful responses.
@@ -140,11 +153,13 @@ Each selected factory has an independent adaptive controller and activity-query 
 
 Azure `408`, `429`, and `5xx` responses reduce the affected factory's limit and trigger retry backoff. Requests already running are allowed to finish; that factory's queued activity queries wait for capacity under the new limit. Pipeline and activity responses both contribute to the factory's adaptation, although its gate applies only to activity-run traversals.
 
-Start with `1 / 3 / 8` and a stable window of `3`. For a shared or frequently throttled subscription, try `1 / 2 / 4` with a stable window of `10`. Increase the maximum only after completed scan notes show stable throughput without throttle failures.
+The tested baseline is `1 / 2 / 4` with a stable window of `15`. If one factory still throttles frequently, use `1 / 1 / 2` with a stable window of `30`. Increase the maximum only after that factory's trace shows stable throughput without repeated `429` responses.
 
 When adaptive scanning is disabled, `SCAN_ACTIVITY_QUERY_CONCURRENCY` becomes the fixed per-factory activity-query limit. Environment values are read when the backend starts; restart the API after changing them. See [Adaptive scanning](../README.md#adaptive-scanning) for precedence, exact scale-down rules, and tuning guidance.
 
-Azure Data Factory allows 1,000 monitoring queries per minute. A `429` with code `TooManyPipelineRunQueryRequests` means the factory named in the response reached that fixed service limit. The scanner reduces concurrency and retries automatically. Start with **Min / Start / Max** set to `1 / 2 / 6` and **Stable window** set to `10`; lower **Max** to `4` if the trace shows frequent occurrences. See [ADF monitoring-query limit](../README.md#adf-monitoring-query-limit) for scope and troubleshooting details.
+Azure Data Factory allows 1,000 monitoring queries per minute. A `429` with code `TooManyPipelineRunQueryRequests` means the factory named in the response reached that fixed service limit. The scanner reduces that factory's concurrency and retries automatically. See [ADF monitoring-query limit](../README.md#adf-monitoring-query-limit) for scope, test results, and troubleshooting details.
+
+Direct API callers can set the same behavior with `factoryConcurrency` and `adaptive` in `POST /api/runs`. See [Run API](../README.md#run-api) for the request body. New trace logs record `adaptiveControllerScope: "factory"`; every `adaptive-concurrency-changed` event includes `factoryName` and `factoryId`.
 
 The backend persists scan data in embedded SQLite at `server/data/adf-migration-planner.sqlite` by default. This includes activity start/end timestamps, pipeline runs, daily metrics, errors, and checkpoints. IndexedDB is used as a browser-side UI cache; SQLite is the authoritative scan store.
 
