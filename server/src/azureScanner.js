@@ -34,6 +34,10 @@ const FABRIC_CUH_PER_MAPPING_DATAFLOW_VCORE_HOUR = 0.5;
 const BYTES_PER_GIB = 1024 * 1024 * 1024;
 const ARM_FETCH_TIMEOUT_MS = Number(process.env.SCAN_ARM_FETCH_TIMEOUT_MS ?? 60000);
 const ARM_FETCH_MAX_RETRIES = Number(process.env.SCAN_ARM_FETCH_MAX_RETRIES ?? 5);
+const configuredMaxQueryPages = Number(process.env.SCAN_MAX_QUERY_PAGES ?? 10000);
+const MAX_QUERY_PAGES = Number.isFinite(configuredMaxQueryPages) && configuredMaxQueryPages >= 1
+  ? Math.trunc(configuredMaxQueryPages)
+  : 10000;
 const BACKEND_AUTH_MODE = process.env.SCAN_AUTH_MODE === 'client-secret' ? 'client-secret' : 'azure-cli';
 
 const ORCHESTRATION_ACTIVITY_TYPES = new Set([
@@ -798,8 +802,9 @@ async function queryPipelineRuns(subscriptionId, resourceGroup, factoryName, las
   const runs = [];
   let continuationToken;
   let pageCount = 0;
+  const seenContinuationTokens = new Set();
 
-  for (let i = 0; i < 20; i += 1) {
+  while (pageCount < MAX_QUERY_PAGES) {
     const page = await armFetch(endpoint, {
       method: 'POST',
       body: JSON.stringify({ lastUpdatedAfter, lastUpdatedBefore, continuationToken }),
@@ -808,17 +813,17 @@ async function queryPipelineRuns(subscriptionId, resourceGroup, factoryName, las
     pageCount += 1;
     runs.push(...(page.value ?? []));
     if (!page.continuationToken) {
-      break;
+      return { runs, pageCount };
     }
 
+    if (seenContinuationTokens.has(page.continuationToken)) {
+      throw new Error(`Pipeline run query returned a repeated continuation token for ${factoryName}.`);
+    }
+    seenContinuationTokens.add(page.continuationToken);
     continuationToken = page.continuationToken;
   }
 
-  if (continuationToken) {
-    throw new Error(`Pipeline run query exceeded the 20-page safety limit for ${factoryName}.`);
-  }
-
-  return { runs, pageCount };
+  throw new Error(`Pipeline run query exceeded the ${MAX_QUERY_PAGES}-page emergency limit for ${factoryName}.`);
 }
 
 async function queryActivityRuns(subscriptionId, resourceGroup, factoryName, runId, lastUpdatedAfter, lastUpdatedBefore, accessTokenOverride, controller = adaptiveConcurrencyController, logger) {
@@ -826,8 +831,9 @@ async function queryActivityRuns(subscriptionId, resourceGroup, factoryName, run
   const activityRuns = [];
   let continuationToken;
   let pageCount = 0;
+  const seenContinuationTokens = new Set();
 
-  for (let i = 0; i < 20; i += 1) {
+  while (pageCount < MAX_QUERY_PAGES) {
     const page = await armFetch(endpoint, {
       method: 'POST',
       body: JSON.stringify({ lastUpdatedAfter, lastUpdatedBefore, continuationToken }),
@@ -836,17 +842,17 @@ async function queryActivityRuns(subscriptionId, resourceGroup, factoryName, run
     pageCount += 1;
     activityRuns.push(...(page.value ?? []));
     if (!page.continuationToken) {
-      break;
+      return { activityRuns, pageCount };
     }
 
+    if (seenContinuationTokens.has(page.continuationToken)) {
+      throw new Error(`Activity run query returned a repeated continuation token for pipeline ${runId}.`);
+    }
+    seenContinuationTokens.add(page.continuationToken);
     continuationToken = page.continuationToken;
   }
 
-  if (continuationToken) {
-    throw new Error(`Activity run query exceeded the 20-page safety limit for pipeline ${runId}.`);
-  }
-
-  return { activityRuns, pageCount };
+  throw new Error(`Activity run query exceeded the ${MAX_QUERY_PAGES}-page emergency limit for pipeline ${runId}.`);
 }
 
 function refreshUsageRecordFromPersistence(runId, factoryId, usageRecord) {

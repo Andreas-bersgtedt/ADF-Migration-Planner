@@ -254,6 +254,7 @@ AZURE_CLIENT_SECRET=<client-secret>
 SCAN_API_ALLOWED_ORIGIN=http://localhost:5173
 SCAN_ARM_FETCH_TIMEOUT_MS=60000
 SCAN_ARM_FETCH_MAX_RETRIES=5
+SCAN_MAX_QUERY_PAGES=10000
 SCAN_ACTIVITY_QUERY_CONCURRENCY=4
 SCAN_DAY_WINDOW_CONCURRENCY=3
 SCAN_FACTORY_CONCURRENCY=2
@@ -380,6 +381,8 @@ The backend maintains one effective runtime limit and request queue per subscrip
 6. Running requests finish. New requests for every factory in that subscription wait until the cooldown and limit permit them.
 
 Transient requests use exponential backoff when Azure does not provide a retry delay. They are retried up to `SCAN_ARM_FETCH_MAX_RETRIES`; retries continue to occupy the same activity-query slot.
+
+Pipeline-run and activity-run queries follow continuation tokens until Azure returns no token. `SCAN_MAX_QUERY_PAGES` is an emergency ceiling, not a normal scan limit; its default of `10000` prevents an unbounded traversal if Azure returns an endless sequence of tokens. A repeated continuation token fails the chunk immediately so it can be inspected and resumed.
 
 #### Outer concurrency
 

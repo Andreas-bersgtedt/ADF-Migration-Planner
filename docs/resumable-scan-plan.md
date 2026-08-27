@@ -30,7 +30,7 @@ The current implementation cannot resume correctly because:
 4. Factory totals are accumulated in memory. Skipping completed days would omit their metrics from the resumed total.
 5. A `partial` day is treated as scanned but is not counted in `failedDayChunks`.
 6. Each factory has an independent adaptive controller. Scanning many factories in one subscription can multiply concurrency against the same subscription and Data Factory resource-provider limits.
-7. Query pagination stops after 20 pages without failing when another continuation token exists. A busy factory can therefore produce a successful but incomplete day.
+7. The original scanner stopped pagination after 20 pages. The implementation now follows tokens to completion, rejects repeated tokens, and retains a configurable emergency ceiling.
 8. Browser and backend run IDs are separate, and the browser does not retain the backend ID as resumable state.
 
 ## Run and Chunk State
@@ -189,7 +189,7 @@ The results grid should label totals as partial while any chunk for that factory
 ### Phase 2: Data integrity and load control
 
 1. Commit chunk detail, metric, and checkpoint state in one transaction.
-2. Remove silent 20-page truncation; fail explicitly at a configurable safety limit.
+2. Follow pagination to completion, reject repeated tokens, and fail only at a configurable emergency limit.
 3. Move adaptive concurrency to subscription-scoped gates.
 4. Add structured throttle and attempt telemetry.
 
@@ -210,7 +210,7 @@ Required cases:
 2. Return 429 with each supported retry header; sibling factories in the subscription observe the shared cooldown.
 3. Exhaust retries for one activity query; the chunk becomes `partial`, the factory remains incomplete, and resume replaces the partial metric.
 4. Resume the same run twice; no chunk is claimed twice and factory totals do not increase.
-5. Leave a continuation token on page 20; the chunk fails instead of being marked complete.
+5. Return more than 20 pages; the query continues to completion. Return a repeated token; the chunk fails instead of looping.
 6. Complete days on both sides of a failed day; the incremental watermark does not cross the gap.
 7. Restart the backend with `running` rows; stale leases become resumable.
 8. Resume a seven-day factory with six completed days; the final factory total includes all seven persisted daily metrics.

@@ -126,4 +126,36 @@ test('resume scans only incomplete chunks and preserves completed totals', async
     state.listCheckpoints(run.runId).find((checkpoint) => checkpoint.metricDate === '2026-08-26').status,
     'pending',
   );
+
+  let pageCount = 0;
+  globalThis.fetch = async (url) => {
+    if (!String(url).includes('/queryPipelineRuns')) {
+      throw new Error(`Unexpected request: ${url}`);
+    }
+
+    pageCount += 1;
+    return Response.json({
+      value: [],
+      ...(pageCount < 21 ? { continuationToken: `page-${pageCount + 1}` } : {}),
+    });
+  };
+
+  const pagedFactory = { ...factories[0], id: `${factories[0].id}-paged`, name: 'factory-paged' };
+  const pagedRun = state.createRun(1, 1, { scanEndUtc: '2026-08-27T00:00:00.000Z' });
+  state.registerFactories(pagedRun.runId, [pagedFactory]);
+  state.initializeCheckpoints(pagedRun.runId, [pagedFactory], buildDayWindows(1, new Date(pagedRun.scanEndUtc)));
+  const pagedResults = await scanFactories(
+    pagedRun.runId,
+    [pagedFactory],
+    1,
+    'test-token',
+    undefined,
+    { enabled: false, min: 1, start: 1, max: 1, stableWindow: 1 },
+    1,
+    undefined,
+    { mode: 'all' },
+  );
+
+  assert.equal(pageCount, 21);
+  assert.equal(pagedResults[0].status, 'collected');
 });
