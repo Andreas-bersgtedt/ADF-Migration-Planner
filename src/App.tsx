@@ -6,7 +6,13 @@ import { StatusCard } from './components/StatusCard';
 import { ScanLogViewer } from './components/ScanLogViewer';
 import { db } from './data/db';
 import { usePlannerData } from './hooks/usePlannerData';
-import { getScanLogUrl, resumeUsageScan, scanSelectedFactories, startInventoryRun } from './services/runOrchestrator';
+import {
+  getScanLogUrl,
+  restoreResumableUsageScan,
+  resumeUsageScan,
+  scanSelectedFactories,
+  startInventoryRun,
+} from './services/runOrchestrator';
 import { exportUsageSummaryToExcel } from './utils/exportExcel';
 
 const scanProfileOptions = [
@@ -55,10 +61,14 @@ function App() {
   const latestRunProgress = latestRun ? progress.filter((item) => item.runId === latestRun.runId) : [];
   const latestRunSteps = latestRun ? runSteps.filter((item) => item.runId === latestRun.runId).slice(0, 20) : [];
   const latestRunUsage = latestRun ? factoryUsage.filter((item) => item.runId === latestRun.runId) : [];
-  const canResumeLatestRun = Boolean(
-    latestRun?.backendRunId &&
-    latestRun.status !== 'completed' &&
-    latestRunUsage.some((item) => item.scannedDayChunks < item.totalDayChunks),
+  const resumableRun = runs.find((run) =>
+    Boolean(
+      run.backendRunId &&
+      run.status !== 'completed' &&
+      factoryUsage.some(
+        (item) => item.runId === run.runId && item.scannedDayChunks < item.totalDayChunks,
+      ),
+    ),
   );
   const scanTargetFactorySet = new Set(scanTargetFactoryIds);
   const scannedFactoryIds = new Set(latestRunUsage.map((item) => item.factoryId));
@@ -150,6 +160,10 @@ function App() {
       void refreshBackendIdentity();
     }
   }, []);
+
+  useEffect(() => {
+    void restoreResumableUsageScan(activeTenantId).catch(() => undefined);
+  }, [activeTenantId]);
 
   useEffect(() => {
     setSelectedFactoryIds((existing) => existing.filter((id) => factories.some((factory) => factory.id === id)));
@@ -273,17 +287,17 @@ function App() {
   }
 
   async function handleResumeScan(): Promise<void> {
-    if (!latestRun?.backendRunId) {
-      setMessage('The latest run does not have a backend scan to resume.');
+    if (!resumableRun?.backendRunId) {
+      setMessage('No incomplete backend scan is available to resume.');
       return;
     }
 
     setIsRunning(true);
-    setScanLogRunId(latestRun.backendRunId);
+    setScanLogRunId(resumableRun.backendRunId);
     setMessage('Resuming failed, partial, and missing day chunks from the original scan window...');
 
     try {
-      const run = await resumeUsageScan(instance, latestRun.runId, setScanLogRunId);
+      const run = await resumeUsageScan(instance, resumableRun.runId, setScanLogRunId);
       setMessage(
         run.status === 'completed'
           ? `Resumed usage scan completed for run ${run.runId}.`
@@ -385,7 +399,7 @@ function App() {
           <div className="panel__header">
             <h2>Execution status</h2>
             <p>{message}</p>
-            {canResumeLatestRun ? (
+            {resumableRun ? (
               <div className="usage-actions">
                 <button className="button" type="button" onClick={handleResumeScan} disabled={isRunning || !isAuthenticated}>
                   {isRunning ? 'Resuming...' : 'Resume failed/missing chunks'}

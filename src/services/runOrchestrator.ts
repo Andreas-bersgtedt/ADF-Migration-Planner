@@ -614,3 +614,54 @@ export async function resumeUsageScan(
     run.backendRunId,
   );
 }
+
+export async function restoreResumableUsageScan(tenantId: string): Promise<string | undefined> {
+  const response = await backendJson<{
+    runs: Array<{
+      runId: string;
+      status: 'queued' | 'running' | 'paused' | 'failed' | 'completed';
+      windowDays: number;
+      startedAtUtc: string;
+      completedAtUtc?: string;
+      message?: string;
+    }>;
+  }>('/api/runs');
+  const localRuns = await db.runs.toArray();
+
+  for (const backendRun of response.runs) {
+    if (backendRun.status === 'completed' || backendRun.status === 'running') {
+      continue;
+    }
+
+    const results = await backendJson<BackendRunResultsResponse>(`/api/runs/${encodeURIComponent(backendRun.runId)}/results`);
+    if (!results.usage.some((row) => row.scannedDayChunks < row.totalDayChunks)) {
+      continue;
+    }
+
+    const existingRun = localRuns.find((run) => run.backendRunId === backendRun.runId);
+    const runId = existingRun?.runId ?? backendRun.runId;
+    const usage = results.usage.map((row) => ({
+      ...row,
+      runId,
+      id: `${runId}:${row.factoryId}`,
+    }));
+
+    await db.transaction('rw', db.runs, db.factoryUsage, async () => {
+      await db.runs.put({
+        runId,
+        backendRunId: backendRun.runId,
+        scanWindowDays: backendRun.windowDays,
+        tenantId,
+        startedAtUtc: backendRun.startedAtUtc,
+        completedAtUtc: backendRun.completedAtUtc,
+        status: toRunStatus(backendRun.status),
+        currentStep: backendRun.message ?? 'Usage scan has incomplete day chunks.',
+      });
+      await db.factoryUsage.bulkPut(usage);
+    });
+
+    return runId;
+  }
+
+  return undefined;
+}
