@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-08-27
+
+### Added in 1.1.1
+
+- Durable day-chunk checkpoints and same-run resume for failed, partial, missing, and interrupted scans.
+- UI recovery of incomplete backend runs when browser-local scan state is unavailable or a newer run has completed.
+
+### Fixed in 1.1.1
+
+- Pipeline and activity query pagination now follows continuation tokens beyond 20 pages, with repeated-token detection and a configurable emergency ceiling.
+- Subscription-scoped adaptive throttling prevents sibling factory scans from multiplying pressure against shared Azure limits.
+
 ## [1.1.0] - 2026-08-26
 
 ### Added in 1.1.0
