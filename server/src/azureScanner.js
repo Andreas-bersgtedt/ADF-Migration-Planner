@@ -2,6 +2,8 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { ConfidentialClientApplication } from '@azure/msal-node';
 import {
+  listCheckpoints,
+  listDailyMetrics,
   recordScanError,
   upsertActivityRuns,
   upsertCheckpoint,
@@ -178,7 +180,9 @@ function createActivityQueryGate(controller, fixedLimit) {
   const waiting = [];
 
   function getLimit() {
-    return controller.isEnabled() ? controller.getLimit() : normalizedFixedLimit;
+    return controller.isEnabled()
+      ? Math.min(normalizedFixedLimit, controller.getLimit())
+      : normalizedFixedLimit;
   }
 
   function drain() {
@@ -489,7 +493,7 @@ function normalizeActivityRun(pipelineRunId, activityRun, activityIndex) {
   };
 }
 
-function buildDayWindows(windowDays, endUtc) {
+export function buildDayWindows(windowDays, endUtc) {
   const windows = [];
   const startUtc = new Date(endUtc.getTime() - windowDays * 24 * 60 * 60 * 1000);
   let cursor = new Date(startUtc);
@@ -810,6 +814,10 @@ async function queryPipelineRuns(subscriptionId, resourceGroup, factoryName, las
     continuationToken = page.continuationToken;
   }
 
+  if (continuationToken) {
+    throw new Error(`Pipeline run query exceeded the 20-page safety limit for ${factoryName}.`);
+  }
+
   return { runs, pageCount };
 }
 
@@ -834,7 +842,75 @@ async function queryActivityRuns(subscriptionId, resourceGroup, factoryName, run
     continuationToken = page.continuationToken;
   }
 
+  if (continuationToken) {
+    throw new Error(`Activity run query exceeded the 20-page safety limit for pipeline ${runId}.`);
+  }
+
   return { activityRuns, pageCount };
+}
+
+function refreshUsageRecordFromPersistence(runId, factoryId, usageRecord) {
+  const metrics = listDailyMetrics(runId, factoryId);
+  const checkpoints = listCheckpoints(runId).filter((checkpoint) => checkpoint.factoryId === factoryId);
+  const completedChunks = checkpoints.filter((checkpoint) => checkpoint.status === 'completed').length;
+  const partialChunks = checkpoints.filter((checkpoint) => checkpoint.status === 'partial').length;
+  const failedChunks = checkpoints.filter((checkpoint) => checkpoint.status === 'failed').length;
+
+  usageRecord.totalDayChunks = checkpoints.length;
+  usageRecord.scannedDayChunks = completedChunks;
+  usageRecord.failedDayChunks = failedChunks + partialChunks;
+  usageRecord.partialDayChunks = partialChunks;
+  usageRecord.pendingDayChunks = checkpoints.filter((checkpoint) => checkpoint.status === 'pending').length;
+  usageRecord.runningDayChunks = checkpoints.filter((checkpoint) => checkpoint.status === 'running').length;
+  usageRecord.pipelineRunCount = 0;
+  usageRecord.activityRunCount = 0;
+  usageRecord.orchestrationActivityRunCount = 0;
+  usageRecord.copyRunCount = 0;
+  usageRecord.mappingDataflowRunCount = 0;
+  usageRecord.pipelineExecutionMinutes = 0;
+  usageRecord.externalPipelineExecutionMinutes = 0;
+  usageRecord.totalDiuHours = 0;
+  usageRecord.mappingDataflowVcoreMinutes = 0;
+  usageRecord.copyDataReadBytes = 0;
+  usageRecord.copyDataWrittenBytes = 0;
+  usageRecord.maxDailyEstimatedFabricCuh = 0;
+  usageRecord.dailyMetrics = metrics.map((metric) => ({
+    metricDate: metric.metricDate,
+    estimatedFabricCuh: metric.estimatedFabricCuh,
+    status: metric.status,
+  }));
+
+  for (const metric of metrics) {
+    usageRecord.pipelineRunCount += metric.pipelineRunCount;
+    usageRecord.activityRunCount += metric.activityRunCount;
+    usageRecord.orchestrationActivityRunCount += metric.orchestrationActivityRunCount;
+    usageRecord.copyRunCount += metric.copyRunCount;
+    usageRecord.mappingDataflowRunCount += metric.mappingDataflowRunCount;
+    usageRecord.pipelineExecutionMinutes += metric.pipelineExecutionMinutes;
+    usageRecord.externalPipelineExecutionMinutes += metric.externalPipelineExecutionMinutes;
+    usageRecord.totalDiuHours += metric.totalDiuHours;
+    usageRecord.mappingDataflowVcoreMinutes += metric.mappingDataflowVcoreMinutes;
+    usageRecord.copyDataReadBytes += metric.copyDataReadBytes;
+    usageRecord.copyDataWrittenBytes += metric.copyDataWrittenBytes;
+    usageRecord.maxDailyEstimatedFabricCuh = Math.max(
+      usageRecord.maxDailyEstimatedFabricCuh,
+      metric.estimatedFabricCuh,
+    );
+  }
+
+  usageRecord.estimatedFabricCuhFromDiu = usageRecord.totalDiuHours * FABRIC_CUH_PER_DIUH;
+  usageRecord.estimatedFabricCuhFromOrchestration =
+    usageRecord.orchestrationActivityRunCount * FABRIC_CUH_PER_ORCHESTRATION_ACTIVITY_RUN;
+  usageRecord.estimatedFabricCuhFromMappingDataflow =
+    (usageRecord.mappingDataflowVcoreMinutes / 60) * FABRIC_CUH_PER_MAPPING_DATAFLOW_VCORE_HOUR;
+  usageRecord.estimatedFabricCuhTotal =
+    usageRecord.estimatedFabricCuhFromDiu +
+    usageRecord.estimatedFabricCuhFromOrchestration +
+    usageRecord.estimatedFabricCuhFromMappingDataflow;
+  usageRecord.peakDailyCuRequired = usageRecord.maxDailyEstimatedFabricCuh / 24;
+  const movedBytes = Math.max(usageRecord.copyDataReadBytes, usageRecord.copyDataWrittenBytes);
+  usageRecord.copyDataMovedGiB = movedBytes > 0 ? movedBytes / BYTES_PER_GIB : 0;
+  usageRecord.note = `Day chunks complete: ${completedChunks}/${checkpoints.length}; partial: ${partialChunks}; failed: ${failedChunks}.`;
 }
 
 async function scanFactory(
@@ -846,11 +922,12 @@ async function scanFactory(
   controller = adaptiveConcurrencyController,
   activityQueryGate = createActivityQueryGate(controller, ACTIVITY_RUN_QUERY_CONCURRENCY),
   logger,
+  scanOptions = {},
 ) {
-  const now = new Date();
   const scanStartTime = Date.now();
   const effectiveWindowDays = Math.max(1, Math.min(7, Math.trunc(windowDays)));
-  const dayWindows = buildDayWindows(effectiveWindowDays, now);
+  const allDayWindows = scanOptions.allDayWindows ?? buildDayWindows(effectiveWindowDays, new Date());
+  const dayWindows = scanOptions.dayWindows ?? allDayWindows;
   await logger?.info('factory-scan-started', {
     factoryId: factory.id,
     factoryName: factory.name,
@@ -858,6 +935,7 @@ async function scanFactory(
     resourceGroup: factory.resourceGroup,
     windowDays: effectiveWindowDays,
     dayWindowCount: dayWindows.length,
+    totalDayWindowCount: allDayWindows.length,
   });
 
   const usageRecord = {
@@ -867,7 +945,7 @@ async function scanFactory(
     factoryName: factory.name,
     subscriptionId: factory.subscriptionId,
     windowDays: effectiveWindowDays,
-    totalDayChunks: dayWindows.length,
+    totalDayChunks: allDayWindows.length,
     scannedDayChunks: 0,
     failedDayChunks: 0,
     activityRunCount: 0,
@@ -894,11 +972,9 @@ async function scanFactory(
     note: `Scanning ${effectiveWindowDays}-day usage in ${dayWindows.length} day chunks...`,
     updatedAtUtc: utcNow(),
   };
-
-  // Shared dedup set: safe across concurrent day tasks because JS processes microtasks
-  // atomically — the synchronous filter+add runs entirely before any other task resumes.
-  const seenPipelineRunIds = new Set();
   const dayChunkErrors = [];
+
+  refreshUsageRecordFromPersistence(runId, factory.id, usageRecord);
 
   if (onProgress) {
     await onProgress({ ...usageRecord });
@@ -918,27 +994,23 @@ async function scanFactory(
     });
 
     try {
-      const pipelineRunsResult = await queryPipelineRuns(
-        factory.subscriptionId,
-        factory.resourceGroup,
-        factory.name,
-        dayWindow.lastUpdatedAfter,
-        dayWindow.lastUpdatedBefore,
-        accessTokenOverride,
-        controller,
-        logger,
+      const pipelineRunsResult = await activityQueryGate.run(() =>
+        queryPipelineRuns(
+          factory.subscriptionId,
+          factory.resourceGroup,
+          factory.name,
+          dayWindow.lastUpdatedAfter,
+          dayWindow.lastUpdatedBefore,
+          accessTokenOverride,
+          controller,
+          logger,
+        ),
       );
       const pipelineRuns = pipelineRunsResult.runs;
       usageRecord.apiCallMetrics.pipelineRunQueryCalls += 1;
       usageRecord.apiCallMetrics.totalPipelineQueryPages += pipelineRunsResult.pageCount;
 
-      // Dedup is safe: this synchronous block runs atomically between awaits.
-      const newPipelineRuns = pipelineRuns.filter(
-        (pipelineRun) => pipelineRun.runId && !seenPipelineRunIds.has(pipelineRun.runId),
-      );
-      for (const pipelineRun of newPipelineRuns) {
-        seenPipelineRunIds.add(pipelineRun.runId);
-      }
+      const newPipelineRuns = pipelineRuns.filter((pipelineRun) => pipelineRun.runId);
 
       upsertPipelineRuns(
         runId,
@@ -1132,28 +1204,7 @@ async function scanFactory(
       });
       upsertCheckpoint(runId, factory.id, dayWindow.label, chunkStatus);
 
-      // Aggregate into usageRecord synchronously — no await between here and onProgress,
-      // so concurrent day tasks never interleave within this block.
-      usageRecord.pipelineRunCount += newPipelineRuns.length;
-      usageRecord.pipelineExecutionMinutes += chunkPipelineExecutionMinutes;
-      usageRecord.activityRunCount += chunkActivityRunCount;
-      usageRecord.orchestrationActivityRunCount += chunkOrchestrationActivityRunCount;
-      usageRecord.copyRunCount += chunkCopyRunCount;
-      usageRecord.mappingDataflowRunCount += chunkMappingDataflowRunCount;
-      usageRecord.externalPipelineExecutionMinutes += chunkExternalPipelineExecutionMinutes;
-      usageRecord.totalDiuHours += chunkDiuHours;
-      usageRecord.mappingDataflowVcoreMinutes += chunkMappingDataflowVcoreMinutes;
-      usageRecord.copyDataReadBytes += chunkCopyDataReadBytes;
-      usageRecord.copyDataWrittenBytes += chunkCopyDataWrittenBytes;
       dayChunkErrors.push(...chunkErrors);
-      usageRecord.maxDailyEstimatedFabricCuh = Math.max(usageRecord.maxDailyEstimatedFabricCuh, chunkEstimatedFabricCuhTotal);
-      usageRecord.peakDailyCuRequired = usageRecord.maxDailyEstimatedFabricCuh / 24;
-      usageRecord.scannedDayChunks += 1;
-      usageRecord.dailyMetrics.push({
-        metricDate: dayWindow.label,
-        estimatedFabricCuh: chunkEstimatedFabricCuhTotal,
-        status: chunkStatus,
-      });
       await logger?.info('day-window-completed', {
         factoryId: factory.id,
         metricDate: dayWindow.label,
@@ -1191,30 +1242,11 @@ async function scanFactory(
         status: 'failed',
         updatedAtUtc: utcNow(),
       });
-      upsertCheckpoint(runId, factory.id, dayWindow.label, 'failed');
-
-      // Aggregate failure into usageRecord synchronously before onProgress.
-      usageRecord.failedDayChunks += 1;
+      upsertCheckpoint(runId, factory.id, dayWindow.label, 'failed', errorMessage);
       dayChunkErrors.push(`${dayWindow.label}: ${errorMessage}`);
-      usageRecord.dailyMetrics.push({
-        metricDate: dayWindow.label,
-        estimatedFabricCuh: 0,
-        status: 'failed',
-      });
     }
 
-    usageRecord.estimatedFabricCuhFromDiu = usageRecord.totalDiuHours * FABRIC_CUH_PER_DIUH;
-    usageRecord.estimatedFabricCuhFromOrchestration =
-      usageRecord.orchestrationActivityRunCount * FABRIC_CUH_PER_ORCHESTRATION_ACTIVITY_RUN;
-    usageRecord.estimatedFabricCuhFromMappingDataflow =
-      (usageRecord.mappingDataflowVcoreMinutes / 60) * FABRIC_CUH_PER_MAPPING_DATAFLOW_VCORE_HOUR;
-    usageRecord.estimatedFabricCuhTotal =
-      usageRecord.estimatedFabricCuhFromDiu +
-      usageRecord.estimatedFabricCuhFromOrchestration +
-      usageRecord.estimatedFabricCuhFromMappingDataflow;
-    const movedBytes = Math.max(usageRecord.copyDataReadBytes, usageRecord.copyDataWrittenBytes);
-    usageRecord.copyDataMovedGiB = movedBytes > 0 ? movedBytes / BYTES_PER_GIB : 0;
-    usageRecord.note = `Day chunks complete: ${usageRecord.scannedDayChunks}/${usageRecord.totalDayChunks}; failed: ${usageRecord.failedDayChunks}.`;
+    refreshUsageRecordFromPersistence(runId, factory.id, usageRecord);
     usageRecord.updatedAtUtc = utcNow();
 
     if (onProgress) {
@@ -1223,9 +1255,9 @@ async function scanFactory(
   });
 
   // Restore date order — parallel tasks may complete out of order.
-  usageRecord.dailyMetrics.sort((a, b) => a.metricDate.localeCompare(b.metricDate));
+  refreshUsageRecordFromPersistence(runId, factory.id, usageRecord);
 
-  usageRecord.status = usageRecord.failedDayChunks > 0 || dayChunkErrors.length > 0 ? 'failed' : 'collected';
+  usageRecord.status = usageRecord.scannedDayChunks === usageRecord.totalDayChunks ? 'collected' : 'failed';
   if (dayChunkErrors.length > 0) {
     usageRecord.note = `${usageRecord.note} Failed chunks: ${dayChunkErrors.join(' | ')}`;
   }
@@ -1267,6 +1299,7 @@ export async function scanFactories(
   adaptiveSettings = DEFAULT_ADAPTIVE_CONCURRENCY,
   factoryConcurrency = DEFAULT_FACTORY_SCAN_CONCURRENCY,
   logger,
+  scanOptions = {},
 ) {
   const normalizedAdaptiveSettings = clampAdaptiveSettings(adaptiveSettings);
   const effectiveFactoryScanConcurrency = clamp(
@@ -1285,7 +1318,7 @@ export async function scanFactories(
       ? Math.min(DAY_WINDOW_CONCURRENCY, normalizedAdaptiveSettings.start)
       : DAY_WINDOW_CONCURRENCY,
     activityRunQueryConcurrency: ACTIVITY_RUN_QUERY_CONCURRENCY,
-    adaptiveControllerScope: 'factory',
+    adaptiveControllerScope: 'subscription',
     adaptive: normalizedAdaptiveSettings,
     armFetchTimeoutMs: ARM_FETCH_TIMEOUT_MS,
     armFetchMaxRetries: ARM_FETCH_MAX_RETRIES,
@@ -1293,9 +1326,49 @@ export async function scanFactories(
     platform: process.platform,
     processId: process.pid,
   });
+  const checkpoints = listCheckpoints(runId);
+  const controllersBySubscription = new Map();
+  const requestGatesBySubscription = new Map();
+
   return mapWithConcurrency(factories, effectiveFactoryScanConcurrency, async (factory) => {
-    const adaptiveController = createRunAdaptiveConcurrencyController(normalizedAdaptiveSettings, logger, factory);
-    const activityQueryGate = createActivityQueryGate(adaptiveController, ACTIVITY_RUN_QUERY_CONCURRENCY);
-    return scanFactory(runId, factory, windowDays, accessTokenOverride, onProgress, adaptiveController, activityQueryGate, logger);
+    let adaptiveController = controllersBySubscription.get(factory.subscriptionId);
+    if (!adaptiveController) {
+      adaptiveController = createRunAdaptiveConcurrencyController(normalizedAdaptiveSettings, logger, factory);
+      controllersBySubscription.set(factory.subscriptionId, adaptiveController);
+      requestGatesBySubscription.set(
+        factory.subscriptionId,
+        createActivityQueryGate(adaptiveController, ACTIVITY_RUN_QUERY_CONCURRENCY),
+      );
+    }
+    const activityQueryGate = requestGatesBySubscription.get(factory.subscriptionId);
+    const factoryCheckpoints = checkpoints.filter((checkpoint) => checkpoint.factoryId === factory.id);
+    const allDayWindows = factoryCheckpoints.map((checkpoint) => ({
+      label: checkpoint.metricDate,
+      lastUpdatedAfter: checkpoint.windowStartUtc,
+      lastUpdatedBefore: checkpoint.windowEndUtc,
+      status: checkpoint.status,
+    }));
+    const mode = scanOptions.mode ?? 'all';
+    const dayWindows = allDayWindows.filter((window) => {
+      if (mode === 'all') {
+        return true;
+      }
+      if (mode === 'failed-only') {
+        return window.status === 'failed' || window.status === 'partial';
+      }
+      return window.status !== 'completed';
+    });
+
+    return scanFactory(
+      runId,
+      factory,
+      windowDays,
+      accessTokenOverride,
+      onProgress,
+      adaptiveController,
+      activityQueryGate,
+      logger,
+      { allDayWindows, dayWindows },
+    );
   });
 }

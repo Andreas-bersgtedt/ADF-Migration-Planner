@@ -124,7 +124,13 @@ database.exec(`
     run_id TEXT NOT NULL,
     factory_id TEXT NOT NULL,
     metric_date TEXT NOT NULL,
+    window_start_utc TEXT,
+    window_end_utc TEXT,
     status TEXT NOT NULL,
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    last_started_at_utc TEXT,
+    last_completed_at_utc TEXT,
     updated_at_utc TEXT NOT NULL,
     PRIMARY KEY (run_id, factory_id, metric_date),
     FOREIGN KEY (run_id, factory_id) REFERENCES factories(run_id, factory_id) ON DELETE CASCADE
@@ -134,4 +140,23 @@ database.exec(`
   CREATE INDEX IF NOT EXISTS idx_pipeline_runs_start ON pipeline_runs(run_start_utc);
   CREATE INDEX IF NOT EXISTS idx_activity_runs_start ON activity_runs(activity_start_utc);
   CREATE INDEX IF NOT EXISTS idx_scan_errors_run ON scan_errors(run_id, occurred_at_utc);
+`);
+
+function ensureColumn(tableName, columnName, definition) {
+  const columns = database.prepare(`PRAGMA table_info(${tableName})`).all();
+  if (!columns.some((column) => column.name === columnName)) {
+    database.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${definition}`);
+  }
+}
+
+ensureColumn('checkpoints', 'window_start_utc', 'TEXT');
+ensureColumn('checkpoints', 'window_end_utc', 'TEXT');
+ensureColumn('checkpoints', 'attempt_count', 'INTEGER NOT NULL DEFAULT 0');
+ensureColumn('checkpoints', 'last_error', 'TEXT');
+ensureColumn('checkpoints', 'last_started_at_utc', 'TEXT');
+ensureColumn('checkpoints', 'last_completed_at_utc', 'TEXT');
+
+database.exec(`
+  CREATE INDEX IF NOT EXISTS idx_checkpoints_resume
+    ON checkpoints(run_id, status, factory_id, metric_date);
 `);

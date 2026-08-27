@@ -34,7 +34,7 @@ function sanitize(value, key = '') {
 export async function createScanLogger(runId, options = {}) {
   await mkdir(logDirectory, { recursive: true });
   const filePath = getLogPath(runId);
-  const file = await open(filePath, 'wx');
+  const file = await open(filePath, options.append ? 'a' : 'wx');
   await file.close();
 
   let pendingWrite = Promise.resolve();

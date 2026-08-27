@@ -31,7 +31,7 @@ export async function fetchScanLog(backendRunId: string): Promise<string> {
 
 interface BackendRunStatus {
   runId: string;
-  status: 'queued' | 'running' | 'completed' | 'failed';
+  status: 'queued' | 'running' | 'paused' | 'completed' | 'failed';
   message?: string;
   lastError?: string;
 }
@@ -354,6 +354,7 @@ export async function scanSelectedFactories(
   traceLogEnabled = true,
   traceVerboseEnabled = false,
   onTraceLogCreated?: (backendRunId: string) => void,
+  resumeBackendRunId?: string,
 ): Promise<RunRecord> {
   if (selectedFactoryIds.length === 0) {
     throw new Error('Select at least one factory before starting the usage scan.');
@@ -404,32 +405,42 @@ export async function scanSelectedFactories(
   try {
     const accessToken = isBackendAuth ? undefined : await acquireArmToken(msalInstance);
 
-    const createResponse = await backendJson<{ runId: string; status: string; logUrl?: string }>('/api/runs', {
+    const requestPath = resumeBackendRunId
+      ? `/api/runs/${encodeURIComponent(resumeBackendRunId)}/resume`
+      : '/api/runs';
+    const requestBody = resumeBackendRunId
+      ? {
+          mode: 'failed-and-missing',
+          ...(accessToken ? { accessToken } : {}),
+        }
+      : {
+          windowDays,
+          traceLogEnabled,
+          traceVerboseEnabled,
+          factoryConcurrency,
+          adaptive: adaptiveSettings ?? {
+            enabled: true,
+            min: 1,
+            start: 3,
+            max: 8,
+            stableWindow: 3,
+          },
+          ...(accessToken ? { accessToken } : {}),
+          factories: selectedFactories.map((factory) => ({
+            id: factory.id,
+            name: factory.name,
+            subscriptionId: factory.subscriptionId,
+            resourceGroup: factory.resourceGroup,
+            location: factory.location,
+          })),
+        };
+    const createResponse = await backendJson<{ runId: string; status: string; logUrl?: string }>(requestPath, {
       method: 'POST',
-      body: JSON.stringify({
-        windowDays,
-        traceLogEnabled,
-        traceVerboseEnabled,
-        factoryConcurrency,
-        adaptive: adaptiveSettings ?? {
-          enabled: true,
-          min: 1,
-          start: 3,
-          max: 8,
-          stableWindow: 3,
-        },
-        ...(accessToken ? { accessToken } : {}),
-        factories: selectedFactories.map((factory) => ({
-          id: factory.id,
-          name: factory.name,
-          subscriptionId: factory.subscriptionId,
-          resourceGroup: factory.resourceGroup,
-          location: factory.location,
-        })),
-      }),
+      body: JSON.stringify(requestBody),
     });
 
     const backendRunId = createResponse.runId;
+    await db.runs.update(runId, { backendRunId, scanWindowDays: windowDays });
     if (createResponse.logUrl) {
       onTraceLogCreated?.(backendRunId);
     }
@@ -572,4 +583,34 @@ export async function scanSelectedFactories(
         : 'Usage collection failed. Ensure the backend API is running (npm run api:dev).',
     );
   }
+}
+
+export async function resumeUsageScan(
+  msalInstance: IPublicClientApplication,
+  runId: string,
+  onTraceLogCreated?: (backendRunId: string) => void,
+): Promise<RunRecord> {
+  const run = await db.runs.get(runId);
+  if (!run?.backendRunId) {
+    throw new Error('This run has no resumable backend scan ID. Start a new usage scan.');
+  }
+
+  const usage = await db.factoryUsage.where('runId').equals(runId).toArray();
+  const factoryIds = Array.from(new Set(usage.map((row) => row.factoryId)));
+  if (factoryIds.length === 0) {
+    throw new Error('This run has no persisted factory usage to resume.');
+  }
+
+  return scanSelectedFactories(
+    msalInstance,
+    runId,
+    factoryIds,
+    run.scanWindowDays ?? usage[0]?.windowDays ?? 7,
+    undefined,
+    2,
+    true,
+    false,
+    onTraceLogCreated,
+    run.backendRunId,
+  );
 }

@@ -29,6 +29,9 @@ export interface FactoryUsageRecord {
   totalDayChunks: number;
   scannedDayChunks: number;
   failedDayChunks: number;
+  partialDayChunks?: number;
+  pendingDayChunks?: number;
+  runningDayChunks?: number;
   activityRunCount: number;
   orchestrationActivityRunCount: number;
   mappingDataflowRunCount: number;
@@ -61,6 +64,8 @@ export interface FactoryDailyMetric {
 
 export interface RunRecord {
   runId: string;
+  backendRunId?: string;
+  scanWindowDays?: number;
   tenantId: string;
   startedAtUtc: string;
   completedAtUtc?: string;

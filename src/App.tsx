@@ -6,7 +6,7 @@ import { StatusCard } from './components/StatusCard';
 import { ScanLogViewer } from './components/ScanLogViewer';
 import { db } from './data/db';
 import { usePlannerData } from './hooks/usePlannerData';
-import { getScanLogUrl, scanSelectedFactories, startInventoryRun } from './services/runOrchestrator';
+import { getScanLogUrl, resumeUsageScan, scanSelectedFactories, startInventoryRun } from './services/runOrchestrator';
 import { exportUsageSummaryToExcel } from './utils/exportExcel';
 
 const scanProfileOptions = [
@@ -55,6 +55,11 @@ function App() {
   const latestRunProgress = latestRun ? progress.filter((item) => item.runId === latestRun.runId) : [];
   const latestRunSteps = latestRun ? runSteps.filter((item) => item.runId === latestRun.runId).slice(0, 20) : [];
   const latestRunUsage = latestRun ? factoryUsage.filter((item) => item.runId === latestRun.runId) : [];
+  const canResumeLatestRun = Boolean(
+    latestRun?.backendRunId &&
+    latestRun.status !== 'completed' &&
+    latestRunUsage.some((item) => item.scannedDayChunks < item.totalDayChunks),
+  );
   const scanTargetFactorySet = new Set(scanTargetFactoryIds);
   const scannedFactoryIds = new Set(latestRunUsage.map((item) => item.factoryId));
   const subscriptionFilterOptions = Array.from(new Set(factories.map((factory) => factory.subscriptionId))).sort((a, b) =>
@@ -149,6 +154,20 @@ function App() {
   useEffect(() => {
     setSelectedFactoryIds((existing) => existing.filter((id) => factories.some((factory) => factory.id === id)));
   }, [factories]);
+
+  useEffect(() => {
+    if (!latestRun) {
+      return;
+    }
+
+    const usage = factoryUsage.filter((item) => item.runId === latestRun.runId);
+    if (usage.length > 0) {
+      setScanTargetFactoryIds(usage.map((item) => item.factoryId));
+      setScanTargetFactoryCount(usage.length);
+      setScanTargetSubscriptionIds(Array.from(new Set(usage.map((item) => item.subscriptionId))));
+    }
+    setScanLogRunId(latestRun.backendRunId ?? null);
+  }, [factoryUsage, latestRun]);
 
   async function handleSignIn(): Promise<void> {
     if (!isMsalConfigured) {
@@ -253,6 +272,30 @@ function App() {
     }
   }
 
+  async function handleResumeScan(): Promise<void> {
+    if (!latestRun?.backendRunId) {
+      setMessage('The latest run does not have a backend scan to resume.');
+      return;
+    }
+
+    setIsRunning(true);
+    setScanLogRunId(latestRun.backendRunId);
+    setMessage('Resuming failed, partial, and missing day chunks from the original scan window...');
+
+    try {
+      const run = await resumeUsageScan(instance, latestRun.runId, setScanLogRunId);
+      setMessage(
+        run.status === 'completed'
+          ? `Resumed usage scan completed for run ${run.runId}.`
+          : `Resume finished with incomplete chunks for run ${run.runId}.`,
+      );
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Usage scan resume failed.');
+    } finally {
+      setIsRunning(false);
+    }
+  }
+
   function toggleFactorySelection(factoryId: string): void {
     setSelectedFactoryIds((existing) =>
       existing.includes(factoryId) ? existing.filter((id) => id !== factoryId) : [...existing, factoryId],
@@ -342,6 +385,13 @@ function App() {
           <div className="panel__header">
             <h2>Execution status</h2>
             <p>{message}</p>
+            {canResumeLatestRun ? (
+              <div className="usage-actions">
+                <button className="button" type="button" onClick={handleResumeScan} disabled={isRunning || !isAuthenticated}>
+                  {isRunning ? 'Resuming...' : 'Resume failed/missing chunks'}
+                </button>
+              </div>
+            ) : null}
             <label className="filter-toolbar__checkbox">
               <input
                 type="checkbox"
@@ -429,7 +479,7 @@ function App() {
           </section>
         ) : null}
 
-        <ScanLogViewer backendRunId={scanLogRunId} scanRunning={isRunning} />
+        <ScanLogViewer backendRunId={scanLogRunId ?? latestRun?.backendRunId ?? null} scanRunning={isRunning} />
 
         <section className="panel">
           <div className="panel__header">
@@ -651,11 +701,11 @@ function App() {
               <button className="button button--secondary" type="button" onClick={clearSelection} disabled={selectedFactoryCount === 0 || isRunning}>
                 Clear
               </button>
-              <button className="button" type="button" onClick={handleScanSelected} disabled={!activeAccount || isRunning || selectedFactoryCount === 0}>
+              <button className="button" type="button" onClick={handleScanSelected} disabled={!isAuthenticated || isRunning || selectedFactoryCount === 0}>
                 {isRunning ? 'Scanning...' : 'Scan selected factories'}
               </button>
-              {scanLogRunId && (
-                <a className="button button--secondary" href={getScanLogUrl(scanLogRunId)} download>
+              {(scanLogRunId ?? latestRun?.backendRunId) && (
+                <a className="button button--secondary" href={getScanLogUrl((scanLogRunId ?? latestRun?.backendRunId)!)} download>
                   Download trace log
                 </a>
               )}

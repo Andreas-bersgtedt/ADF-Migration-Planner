@@ -45,7 +45,7 @@ function pruneOldRuns() {
   })(staleRows);
 }
 
-export function createRun(windowDays, factoryCount) {
+export function createRun(windowDays, factoryCount, configuration = {}) {
   const run = {
     runId: createId('run'),
     createdAtUtc: utcNow(),
@@ -57,6 +57,7 @@ export function createRun(windowDays, factoryCount) {
     scannedDayChunks: 0,
     totalDayChunks: factoryCount * windowDays,
     message: 'Run queued.',
+    ...configuration,
   };
 
   saveRun(run);
@@ -97,6 +98,20 @@ export function getUsage(runId) {
   return database.prepare(`
     SELECT payload_json FROM factory_usage WHERE run_id = ? ORDER BY updated_at_utc DESC, factory_id
   `).all(runId).map(parsePayload);
+}
+
+export function getFactories(runId) {
+  return database.prepare(`
+    SELECT
+      factory_id AS id,
+      factory_name AS name,
+      subscription_id AS subscriptionId,
+      resource_group AS resourceGroup,
+      location
+    FROM factories
+    WHERE run_id = ?
+    ORDER BY subscription_id, factory_name
+  `).all(runId);
 }
 
 export function updateRun(runId, updater) {
@@ -226,12 +241,125 @@ export function recordScanError(runId, factoryId, metricDate, scope, message) {
   `).run(runId, factoryId ?? null, metricDate ?? null, scope, message, utcNow());
 }
 
-export function upsertCheckpoint(runId, factoryId, metricDate, status) {
+export function initializeCheckpoints(runId, factories, dayWindows) {
+  const statement = database.prepare(`
+    INSERT INTO checkpoints (
+      run_id, factory_id, metric_date, window_start_utc, window_end_utc, status, updated_at_utc
+    ) VALUES (?, ?, ?, ?, ?, 'pending', ?)
+    ON CONFLICT(run_id, factory_id, metric_date) DO UPDATE SET
+      window_start_utc = excluded.window_start_utc,
+      window_end_utc = excluded.window_end_utc,
+      updated_at_utc = excluded.updated_at_utc
+  `);
+
+  database.transaction(() => {
+    const now = utcNow();
+    for (const factory of factories) {
+      for (const window of dayWindows) {
+        statement.run(
+          runId,
+          factory.id,
+          window.label,
+          window.lastUpdatedAfter,
+          window.lastUpdatedBefore,
+          now,
+        );
+      }
+    }
+  })();
+}
+
+export function listCheckpoints(runId) {
+  return database.prepare(`
+    SELECT
+      run_id AS runId,
+      factory_id AS factoryId,
+      metric_date AS metricDate,
+      window_start_utc AS windowStartUtc,
+      window_end_utc AS windowEndUtc,
+      status,
+      attempt_count AS attemptCount,
+      last_error AS lastError,
+      last_started_at_utc AS lastStartedAtUtc,
+      last_completed_at_utc AS lastCompletedAtUtc,
+      updated_at_utc AS updatedAtUtc
+    FROM checkpoints
+    WHERE run_id = ?
+    ORDER BY factory_id, metric_date
+  `).all(runId);
+}
+
+export function listDailyMetrics(runId, factoryId) {
+  return database.prepare(`
+    SELECT
+      metric_date AS metricDate,
+      window_start_utc AS windowStartUtc,
+      window_end_utc AS windowEndUtc,
+      pipeline_run_count AS pipelineRunCount,
+      activity_run_count AS activityRunCount,
+      orchestration_activity_run_count AS orchestrationActivityRunCount,
+      copy_run_count AS copyRunCount,
+      mapping_dataflow_run_count AS mappingDataflowRunCount,
+      pipeline_execution_minutes AS pipelineExecutionMinutes,
+      external_pipeline_execution_minutes AS externalPipelineExecutionMinutes,
+      total_diu_hours AS totalDiuHours,
+      mapping_dataflow_vcore_minutes AS mappingDataflowVcoreMinutes,
+      copy_data_read_bytes AS copyDataReadBytes,
+      copy_data_written_bytes AS copyDataWrittenBytes,
+      estimated_fabric_cuh AS estimatedFabricCuh,
+      status,
+      updated_at_utc AS updatedAtUtc
+    FROM daily_metrics
+    WHERE run_id = ? AND factory_id = ?
+    ORDER BY metric_date
+  `).all(runId, factoryId);
+}
+
+export function recoverInterruptedRuns() {
+  const interruptedRunIds = database.prepare(`
+    SELECT run_id FROM runs WHERE status = 'running'
+  `).all().map((row) => row.run_id);
+
+  database.transaction(() => {
+    database.prepare(`
+      UPDATE checkpoints
+      SET status = 'pending', updated_at_utc = ?
+      WHERE status = 'running'
+    `).run(utcNow());
+
+    for (const runId of interruptedRunIds) {
+      updateRun(runId, (run) => ({
+        ...run,
+        status: 'paused',
+        message: 'Run was interrupted and can be resumed.',
+      }));
+    }
+  })();
+
+  return interruptedRunIds;
+}
+
+export function upsertCheckpoint(runId, factoryId, metricDate, status, errorMessage = null) {
+  const now = utcNow();
   database.prepare(`
-    INSERT INTO checkpoints (run_id, factory_id, metric_date, status, updated_at_utc)
-    VALUES (?, ?, ?, ?, ?)
+    INSERT INTO checkpoints (run_id, factory_id, metric_date, status, attempt_count, last_error, last_started_at_utc, last_completed_at_utc, updated_at_utc)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(run_id, factory_id, metric_date) DO UPDATE SET
       status = excluded.status,
+      attempt_count = checkpoints.attempt_count + CASE WHEN excluded.status = 'running' THEN 1 ELSE 0 END,
+      last_error = excluded.last_error,
+      last_started_at_utc = CASE WHEN excluded.status = 'running' THEN excluded.last_started_at_utc ELSE checkpoints.last_started_at_utc END,
+      last_completed_at_utc = CASE WHEN excluded.status IN ('completed', 'partial', 'failed') THEN excluded.last_completed_at_utc ELSE checkpoints.last_completed_at_utc END,
       updated_at_utc = excluded.updated_at_utc
-  `).run(runId, factoryId, metricDate, status, utcNow());
+  `).run(
+    runId,
+    factoryId,
+    metricDate,
+    status,
+    status === 'running' ? 1 : 0,
+    errorMessage,
+    status === 'running' ? now : null,
+    ['completed', 'partial', 'failed'].includes(status) ? now : null,
+    now,
+  );
 }
